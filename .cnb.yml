@@ -72,12 +72,10 @@
 .vars: &vars
   REDIS_VERSION: "8.10.1"
 
-# 稳定版只认 vRedis-* 标签；其余 tag（例如历史遗留的 latest）直接跳过
-.is-version-tag: &is-version-tag |
-  case "${CNB_BRANCH:-${CI_COMMIT_TAG:-}}" in
-    vRedis-*) exit 0 ;;
-    *) echo ">>> 非版本 tag，跳过: ${CNB_BRANCH:-${CI_COMMIT_TAG:-}}"; exit 1 ;;
-  esac
+# 稳定版只认 vRedis-* 标签。
+# ⚠️ 注意：CNB 的 `if` 字段**只支持 Stage / Job 级别**，写在 Pipeline 级别不生效
+#    （会被静默忽略），所以不能用 `if` 脚本来过滤 Tag。正确做法是在 tag_push 下用
+#    「Tag 名 glob」作为第一层键（见文件末尾「稳定版」一节）。
 
 # ── 统一阶段（两架构 + 主线/稳定版 共用） ──────────────────────────────────
 # 场景判定放在第一个 stage，通过 exports 把结果注入后续 stage 的环境变量。
@@ -269,16 +267,16 @@ master:
       stages: *stages
 
 # ── 稳定版：git tag 推送（两条流水线并行） ─────────────────────────────────
-# 说明：主线发布走 CNB Release API（make_latest=true），不再创建名为 latest 的
-#       git tag，因此不会再产生「latest tag 触发 tag_push」的噪声构建；
-#       这里仍保留 if 过滤，只放行 vRedis-*。
-$:
+# 说明：tag_push 的第一层键匹配的是 **Tag 名称**（支持 glob 与 `$` 兜底匹配）。
+#       这里用 glob "vRedis-*"，只有版本 tag 才触发稳定版构建。
+# ⚠️ 不要写成兜底符 `$`：滚动发布会往仓库里生成 latest / latest-7.x 两个 tag
+#    （创建 Release 时会连带建 tag），用 `$` 会把它们一并匹配进来，触发一次多余的
+#    完整构建（含 Dockerfile 构建）——既浪费构建节点，又可能因镜像源网络抖动而变红。
+"vRedis-*":
   tag_push:
     - name: stable-amd64
       <<: *build-env-amd64
-      if: *is-version-tag
       stages: *stages
     - name: stable-arm64
       <<: *build-env-arm64
-      if: *is-version-tag
       stages: *stages
