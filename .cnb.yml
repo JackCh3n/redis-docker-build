@@ -19,10 +19,22 @@
 #     2) 并发安全：两条流水线可能同时创建，409/422 视为已存在
 #   上传阶段只 glob 本流水线 workspace 下的 dist/*.tar.gz，天然互不覆盖。
 #
-# 版本语义（与 GitHub Actions 一致）
+# 分支与版本语义（与 GitHub Actions 一致）
 # ---------
-#   - 主线：main / master push    -> 固定 Release `latest`（滚动更新）
-#   - 稳定：git tag vRedis-x.y.z  -> 同名 tag Release（固化）
+#   本仓库按 Redis 主版本拆分为两条独立维护的分支线（两条线构建体系差异较大）：
+#     * main 分支 = 8.x 线：Redis 8.10.1，RSALv2/SSPLv1/AGPLv3 三许可，滚动发布 `latest`
+#     * 7.x  分支 = 7.x 线：Redis 7.2.16，BSD-3-Clause，滚动发布 `latest-7.x`
+#   本文件位于 main 分支，因此这里的语义是：
+#     - 主线：main / master push    -> 固定 Release `latest`（滚动更新）
+#     - 稳定：git tag vRedis-x.y.z  -> 同名 tag Release（固化）
+#
+# 构建产物形态（8.x 线重要差异）
+# ---------
+#   Redis 8.10 起官方重写顶层 Makefile，裸跑 make 会连带编译随包的 bundled modules
+#   （RediSearch/Query Engine、vector-sets 等），需要 LLVM 21 + Rust 1.94 +
+#   CMake 3.25~3.31.6，在 glibc 2.17 编译环境不可行。
+#   因此 8.x 线固定「仅编译核心」（build-redis.sh 内自动使用 `make build redis`），
+#   产物为完整核心（KV / 持久化 / 主从 / Cluster / Sentinel / TLS / 脚本）。
 # =============================================================================
 
 # ── 构建环境锚点（按架构各一份；runner 只能写在流水线级别） ────────────────
@@ -55,11 +67,10 @@
       buildArgs:
         BASE_IMAGE: arm64v8/centos:7
 
-# 默认 Redis 版本（主线构建用）
-#   7.2.16 = 最后一个 BSD-3-Clause 版本，生产推荐
-#   8.10.1 = 当前最新版（RSALv2/SSPLv1/AGPLv3 三许可），可用 tag 手动发布
+# 默认 Redis 版本（main 分支 = 8.x 线，默认构建当前最新版 8.10.1）
+#   注意：8.10.1 为 RSALv2/SSPLv1/AGPLv3 三许可；需要纯 BSD 协议请用 7.x 分支。
 .vars: &vars
-  REDIS_VERSION: "7.2.16"
+  REDIS_VERSION: "8.10.1"
 
 # 稳定版只认 vRedis-* 标签；其余 tag（例如历史遗留的 latest）直接跳过
 .is-version-tag: &is-version-tag |
@@ -85,9 +96,9 @@
           echo ">>> 场景: 稳定版构建（tag=${REF}，版本=${V}）"
           ;;
         *)
-          V="${REDIS_VERSION:-7.2.16}"
+          V="${REDIS_VERSION:-8.10.1}"
           TAG="latest"
-          TITLE="Mainline (latest)"
+          TITLE="Mainline 8.x (latest)"
           MK="true"
           echo ">>> 场景: 主线构建（ref=${REF}，版本=${V}）"
           ;;
@@ -131,6 +142,8 @@
         install -m 0755 install.sh "${d}install.sh"
         install -m 0644 assets/redis.service "${d}redis.service"
         install -m 0644 assets/redis.conf.example "${d}redis.conf"
+        # 项目自身许可证（MIT）；上游 Redis 许可证由 build-redis.sh 生成 LICENSE.redis.txt
+        install -m 0644 LICENSE "${d}LICENSE"
       done
       ls -lh dist/*/
 
@@ -145,7 +158,7 @@
   - name: gen-notes
     script: |
       set -e
-      printf '## %s\n\nRedis Open Source %s, built in a Docker-simulated CentOS 7 (glibc 2.17) environment.\n\n| Arch | Asset | Runs on |\n|------|-------|---------|\n| x86_64 | `redis-%s-x86_64.tar.gz` | CentOS 7.6 / 7.9 and later |\n| aarch64 | `redis-%s-aarch64.tar.gz` | aarch64 with glibc >= 2.17 (incl. Kylin V10 SP3) |\n\nEach tarball is self-contained: extract it and run `sudo ./install.sh` (offline install / in-place update).\n\n- Toolchain: CentOS 7 vault archive + devtoolset-10 (GCC 10.2)\n- Allocator: jemalloc (aarch64 uses `--with-lg-page=16` for 4K/64K pages)\n\n> Redis 8.x is RSALv2/SSPLv1/AGPLv3; 7.2.x and earlier is BSD-3-Clause.\n' \
+      printf '## %s\n\nRedis Open Source %s **core-only**, built in a Docker-simulated CentOS 7 (glibc 2.17) environment.\n\n| Arch | Asset | Runs on |\n|------|-------|---------|\n| x86_64 | `redis-%s-x86_64.tar.gz` | CentOS 7.6 / 7.9 and later |\n| aarch64 | `redis-%s-aarch64.tar.gz` | aarch64 with glibc >= 2.17 (incl. Kylin V10 SP3) |\n\nEach tarball is self-contained: extract it and run `sudo ./install.sh` (offline install / in-place update).\nIt ships `install.sh`, `redis.conf`, `redis.service`, `LICENSE` (this project, MIT) and `LICENSE.redis.txt` (upstream Redis license).\n\n- **Scope: Redis core only** — KV, persistence (RDB/AOF), replication, Cluster, Sentinel, TLS, scripting.\n  Bundled modules (JSON / Search / TimeSeries / probabilistic / vector-sets) require LLVM 21 + Rust 1.94 + CMake 3.25-3.31.6 and cannot be built on a glibc 2.17 toolchain.\n- Toolchain: CentOS 7 vault archive + devtoolset-10 (GCC 10.2)\n- Allocator: jemalloc (aarch64 uses `--with-lg-page=16` for 4K/64K pages)\n\n> Redis 8.x is licensed under RSALv2 / SSPLv1 / AGPLv3 (tri-license, **at your option**).\n> Redis 7.4-7.8 is RSALv2/SSPLv1; Redis 7.2.x and earlier is BSD-3-Clause (see the `7.x` branch).\n' \
         "${RELEASE_TITLE}" "${RELEASE_VERSION}" "${RELEASE_VERSION}" "${RELEASE_VERSION}" > RELEASE_NOTES.md
       cat RELEASE_NOTES.md
 

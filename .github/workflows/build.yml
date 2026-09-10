@@ -1,12 +1,20 @@
 # =============================================================================
 # redis-docker-build · GitHub Actions 构建流水线（多架构）
 #
-# 版本语义（主线 vs 稳定版）：
+# 分支与版本语义（本文件位于 main 分支）：
+#   仓库按 Redis 主版本拆成两条独立维护的分支线（两条线构建体系差异较大）：
+#     * main 分支 = 8.x 线：Redis 8.10.1（RSALv2/SSPLv1/AGPLv3 三许可），滚动发布 `latest`
+#     * 7.x  分支 = 7.x 线：Redis 7.2.16（BSD-3-Clause），滚动发布 `latest-7.x`
 #   - 主线版本：push 到 main 分支自动构建默认版本（x86_64 + aarch64），
 #     发布到固定 Release 标签 `latest`（每次覆盖更新）
-#   - 稳定版本：打 git tag（vRedis-7.2.16）触发，从 tag 名解析版本，
+#   - 稳定版本：打 git tag（vRedis-8.10.1）触发，从 tag 名解析版本，
 #     发布到同名 tag（固化）
 #   - 手动触发：workflow_dispatch 可指定任意版本 / 分配器 / 架构 / TLS
+#
+# 产物形态（8.x 线重要差异）：
+#   Redis 8.10 起裸跑 make 会连带编译随包的 bundled modules（需要 LLVM 21 + Rust 1.94 +
+#   CMake 3.25~3.31.6），在 glibc 2.17 环境不可行。故 8.x 线固定「仅编译核心」，
+#   build-redis.sh 会自动使用 `make build redis`。
 #
 # 架构说明：
 #   x86_64  -> ubuntu-latest 原生构建，基础镜像 centos:7.6.1810（glibc 2.17）
@@ -25,9 +33,9 @@ on:
   workflow_dispatch:
     inputs:
       redis-version:
-        description: "Redis 版本号（如 7.2.16 / 8.10.1）"
+        description: "Redis 版本号（如 8.10.1 / 7.2.16）"
         required: false
-        default: "7.2.16"
+        default: "8.10.1"
       malloc:
         description: "内存分配器 auto|jemalloc|libc"
         required: false
@@ -67,7 +75,7 @@ jobs:
         name: 解析场景与版本
         run: |
           set -e
-          DEFAULT_VERSION="7.2.16"
+          DEFAULT_VERSION="8.10.1"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             V="${{ github.event.inputs.redis-version }}"; V="${V:-$DEFAULT_VERSION}"
             M="${{ github.event.inputs.malloc }}"; M="${M:-auto}"
@@ -193,6 +201,8 @@ jobs:
             sudo install -m 0755 install.sh "${d}install.sh"
             sudo install -m 0644 assets/redis.service "${d}redis.service"
             sudo install -m 0644 assets/redis.conf.example "${d}redis.conf"
+            # 项目自身许可证（MIT）；上游 Redis 许可证由 build-redis.sh 生成 LICENSE.redis.txt
+            sudo install -m 0644 LICENSE "${d}LICENSE"
           done
           ls -lh dist/*/
 
@@ -254,7 +264,7 @@ jobs:
           fi
 
           case "$SCENE" in
-            mainline) TITLE="Mainline (latest)" ;;
+            mainline) TITLE="Mainline 8.x (latest)" ;;
             tag)      TITLE="Stable Redis ${VERSION}" ;;
             *)        TITLE="Redis ${VERSION}" ;;
           esac
@@ -272,9 +282,14 @@ jobs:
           - Allocator: \`${MALLOC}\`（aarch64 使用 jemalloc \`--with-lg-page=16\` 以兼容 4KB/64KB 页）
           - TLS: \`${TLS_FLAG}\`
           - Toolchain: CentOS 7 vault 归档源 + devtoolset-10（GCC 10.2）
+          - **Scope: Redis core only** — KV、持久化（RDB/AOF）、主从、Cluster、Sentinel、TLS、脚本。
+            随包 bundled modules（JSON / Search / TimeSeries / 概率结构 / vector-sets）需要
+            LLVM 21 + Rust 1.94 + CMake 3.25~3.31.6，在 glibc 2.17 工具链上无法构建。
           - Each tarball contains BUILD-INFO.txt（含 \`redis-server --version\`、glibc 符号上限、ldd、冒烟测试结果）
+            以及 \`LICENSE\`（本项目 MIT）与 \`LICENSE.redis.txt\`（上游 Redis 许可证原文）
 
-          ⚠️ Redis 8.x 起为 RSALv2 / SSPLv1 / AGPLv3 三选一许可；7.2.x 及更早为 BSD-3-Clause。
+          ⚠️ Redis 8.x 为 RSALv2 / SSPLv1 / AGPLv3 **三选一**（由使用者选择）；
+          7.4~7.8 为 RSALv2/SSPLv1；7.2.x 及更早为 BSD-3-Clause（见 \`7.x\` 分支）。
           EOF
 
           publish() {

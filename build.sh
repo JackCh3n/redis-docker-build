@@ -9,7 +9,7 @@
 #   ./build.sh native [版本] [malloc]                     # 当前主机原生编译（无需 Docker）
 #
 # 示例：
-#   ./build.sh build                       # 默认版本 7.2.16，本机架构
+#   ./build.sh build                       # 默认版本 8.10.1，本机架构
 #   ./build.sh build 8.10.1 aarch64        # 构建 aarch64 的 Redis 8.10.1
 #   ./build.sh build 7.2.16 x86_64 libc    # 指定 libc 分配器
 #
@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 IMAGE_TAG="redis-builder:el7"
-DEFAULT_VERSION="7.2.16"
+DEFAULT_VERSION="8.10.1"
 DIST_DIR="${SCRIPT_DIR}/dist"
 mkdir -p "$DIST_DIR"
 
@@ -88,7 +88,7 @@ build_binary() {
     --redis-version "$ver" --malloc "$malloc" --output /opt/dist --smoke yes
 }
 
-# 把 install.sh 与 assets/ 装入产物目录，使 tar.gz 自包含、可离线一键安装
+# 把 install.sh / assets/ / 许可证装入产物目录，使 tar.gz 自包含、可离线一键安装
 bundle_and_package() {
   local d
   echo ">>> 装入 install.sh 与 assets（使产物包自包含）"
@@ -98,6 +98,8 @@ bundle_and_package() {
     chmod 0755 "${d}install.sh"
     cp -f "${SCRIPT_DIR}/assets/redis.service"     "${d}redis.service"
     cp -f "${SCRIPT_DIR}/assets/redis.conf.example" "${d}redis.conf"
+    # 项目自身许可证（MIT）；上游 Redis 许可证由 build-redis.sh 生成 LICENSE.redis.txt
+    cp -f "${SCRIPT_DIR}/LICENSE"                  "${d}LICENSE"
   done
   echo ">>> 打包 tar.gz"
   ( cd "$DIST_DIR" && for d in */; do tar czf "${d%/}.tar.gz" "${d%/}"; done )

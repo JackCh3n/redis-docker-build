@@ -17,14 +17,14 @@
 # 快速开始
 # ---------------------------------------------------------------------------
 #   # 方式 1：包内直接执行（推荐）
-#   tar xzf redis-7.2.16-aarch64.tar.gz
-#   cd redis-7.2.16-aarch64
+#   tar xzf redis-8.10.1-aarch64.tar.gz
+#   cd redis-8.10.1-aarch64
 #   sudo ./install.sh
 #
 #   # 方式 2：脚本与压缩包放在同一目录
 #   sudo ./install.sh                      # 自动发现 redis-*.tar.gz
-#   sudo ./install.sh --pkg redis-7.2.16-x86_64.tar.gz
-#   sudo ./install.sh --from /tmp/redis-7.2.16-x86_64.tar.gz
+#   sudo ./install.sh --pkg redis-8.10.1-x86_64.tar.gz
+#   sudo ./install.sh --from /tmp/redis-8.10.1-x86_64.tar.gz
 #
 #   # 只想看看会不会装 / 装什么版本
 #   ./install.sh --check

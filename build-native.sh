@@ -10,8 +10,8 @@
 #
 # 用法：
 #   ./build-native.sh                       # 默认版本，自动探测环境
-#   ./build-native.sh 7.2.16                # 指定版本
-#   ./build-native.sh 7.2.16 jemalloc yes   # 版本 / 分配器 / 是否带 TLS
+#   ./build-native.sh 8.10.1                # 指定版本
+#   ./build-native.sh 8.10.1 jemalloc yes   # 版本 / 分配器 / 是否带 TLS
 #   ./build-native.sh --install-deps        # 先尝试安装编译依赖（yum/dnf/apt）
 #
 # 参数： [版本] [malloc=auto|jemalloc|libc] [tls=yes|no]
@@ -20,7 +20,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-REDIS_VERSION="7.2.16"
+REDIS_VERSION="8.10.1"
 MALLOC_ARG="auto"
 TLS_ARG="no"
 INSTALL_DEPS=no

@@ -7,19 +7,24 @@
 #
 # 用法示例：
 #   docker run --rm -v /opt/redis-dist:/opt/dist redis-builder:7.6 \
-#     --redis-version 7.2.16
+#     --redis-version 8.10.1
 #
 #   docker run --rm -v /opt/redis-dist:/opt/dist redis-builder:7.6 \
 #     --redis-version 8.10.1 --malloc jemalloc --tls yes --smoke yes
 #
 # 参数（均可换成同名环境变量，命令行优先级更高）：
-#   --redis-version  Redis 版本号            (默认 7.2.16)
+#   --redis-version  Redis 版本号            (默认 8.10.1)
 #   --prefix         安装前缀 make install PREFIX= (默认 /usr/local)
 #   --output         产物输出目录            (默认 /opt/dist)
 #   --malloc         内存分配器 auto|jemalloc|libc (默认 auto)
 #   --tls            是否编译 TLS 支持 yes|no   (默认 no，需 openssl-devel)
 #   --systemd        是否编译 systemd 支持 yes|no (默认 no，需 systemd-devel)
-#   --modules        是否编译 8.x 内置模块 yes|no (默认 no，需 Rust 与网络)
+#   --modules        是否编译 8.x bundled modules yes|no（默认 no）
+#                    仅 8.0~8.8 生效（传 BUILD_WITH_MODULES=yes，需 Rust 与网络）；
+#                    Redis >= 8.10 的模块（Query Engine / vector-sets 等）需要
+#                    LLVM 21 + Rust 1.94 + CMake 3.25~3.31.6，本工程面向
+#                    glibc 2.17（CentOS 7.6 / 麒麟 V10 SP3）无法满足，
+#                    因此 >= 8.10 传 yes 会直接报错退出，详见「构建体系判定」。
 #   --lg-page        jemalloc 最大页大小 log2，aarch64 默认 16（支持 64KB 页）
 #   --prog-suffix    程序名后缀（PROG_SUFFIX），默认空
 #   --jobs           编译并行数              (默认 nproc)
@@ -36,10 +41,29 @@
 #     aarch64 默认 16），jemalloc 即同时支持 4KB / 64KB 页。
 #   * Redis < 7.0 ：该变量不存在，aarch64 上默认改用 libc 分配器（安全优先）。
 #   * 仍不放心可显式 --malloc libc，彻底规避页大小问题（碎片率略高）。
+#
+# 关于 Redis >= 8.10 的构建体系（重要）
+# ------------------------------------------
+# Redis 8.10 起顶层 Makefile 被重写，默认目标 build 会编译 modules/*/src 下
+# **所有已存在的模块**；而官方源码包已随附 redisearch(Query Engine) / redisjson /
+# redistimeseries / redisbloom / vector-sets 源码，于是「裸跑 make」会连带触发
+# 这些模块的编译，需要 LLVM 21 + Rust 1.94 + CMake 3.25~3.31.6。
+# 本工程刻意把 ABI 下限压在 glibc 2.17（CentOS 7.6 / 麒麟 V10 SP3），上述工具链
+# 在该环境无法满足，因此 >= 8.10 固定「仅编译核心」：`make build redis`。
+# 产物 = 完整核心（KV / 持久化 / 主从 / Cluster / Sentinel / TLS / 脚本），
+# 不含 JSON / Search / TimeSeries / 概率结构 / vector-sets 等 bundled modules。
+#
+# 关于许可证（合规提示）
+# ------------------------------------------
+# Redis 7.2.x 及更早：BSD-3-Clause。
+# Redis 7.4.x~7.8.x：RSALv2 或 SSPLv1（二选一，非 OSI 开源）。
+# Redis 8.0.x 及以后：RSALv2 / SSPLv1 / AGPLv3（三选一，AGPLv3 为 OSI 认可开源）。
+# 分发二进制时**必须随包附带上游许可证全文**，本脚本会自动把源码包内的
+# LICENSE.txt（8.x）或 COPYING（7.x）复制为产物目录下的 LICENSE.redis.txt。
 # =============================================================
 set -euo pipefail
 
-REDIS_VERSION="${REDIS_VERSION:-7.2.16}"
+REDIS_VERSION="${REDIS_VERSION:-8.10.1}"
 PREFIX="${REDIS_PREFIX:-/usr/local}"
 OUTPUT="${OUTPUT_DIR:-/opt/dist}"
 MALLOC="${REDIS_MALLOC:-auto}"
@@ -116,6 +140,23 @@ if ver_ge "$REDIS_VERSION" "6.0.0"; then
   fi
 fi
 
+# ---------- 构建体系判定（Redis >= 8.10 顶层 Makefile 重写） ----------
+# 见文件头「关于 Redis >= 8.10 的构建体系」。
+NEW_BUILD_SYS=no
+if ver_ge "$REDIS_VERSION" "8.10.0"; then
+  NEW_BUILD_SYS=yes
+  if [ "$MODULES" = "yes" ]; then
+    echo "[ERROR] 无法构建 Redis ${REDIS_VERSION} 的 bundled modules。" >&2
+    echo "        原因：Redis >= 8.10 的模块（RediSearch/Query Engine、vector-sets 等）需要" >&2
+    echo "              LLVM 21 + Rust 1.94 + CMake 3.25~3.31.6；而本工程编译环境刻意压在" >&2
+    echo "              glibc 2.17（CentOS 7.6 / 银河麒麟 V10 SP3）以保证产物兼容性。" >&2
+    echo "        做法：去掉 --modules 即可（构建完整核心：KV/持久化/主从/Cluster/Sentinel/TLS）。" >&2
+    echo "              若确需 JSON/Search/TimeSeries 等，请在更高 glibc 基线的系统上自行源码编译。" >&2
+    exit 1
+  fi
+  echo ">>> [策略] Redis >= 8.10：强制仅编译核心（make build redis），跳过 bundled modules"
+fi
+
 # ---------- 分配器与页大小推导 ----------
 if [ "$MALLOC" = "auto" ]; then
   if [ "$ARCH" = "aarch64" ] && ! ver_ge "$REDIS_VERSION" "7.0.0"; then
@@ -189,16 +230,33 @@ fi
 [ "$MODULES" = "yes" ] && MAKE_FLAGS+=("BUILD_WITH_MODULES=yes")
 [ -n "$PROG_SUFFIX" ]  && MAKE_FLAGS+=("PROG_SUFFIX=${PROG_SUFFIX}")
 
+# Python 防护（Redis 8.x）
+# src/Makefile 会在 PYTHON 可用时尝试用 python3 重新生成 commands.def / fmtargs.h。
+# CentOS 7 系统 python 是 python2，而生成脚本是 python3 语法；一旦 make 判定这两个
+# 文件「需要重建」就会用 python2 运行并失败。源码包已随附预生成的 commands.def 与
+# fmtargs.h，因此这里在「没有 python3」时显式置空 PYTHON，让 make 直接使用随包文件。
+if [ "$NEW_BUILD_SYS" = "yes" ] && ! command -v python3 >/dev/null 2>&1; then
+  MAKE_FLAGS+=("PYTHON=")
+  echo ">>> [防护] 未检测到 python3：置 PYTHON= 以使用源码包内预生成的 commands.def"
+fi
+
+# Redis >= 8.10 必须显式给出 `build redis` 目标才会「只编译核心」；
+# 更早版本裸跑 make 即为核心，无需额外目标。
+MAKE_GOALS=""
+[ "$NEW_BUILD_SYS" = "yes" ] && MAKE_GOALS="build redis"
+
 # ---------- 编译 ----------
 echo ">>> make distclean"
 make distclean >/dev/null 2>&1 || true
 
-echo ">>> make -j${JOBS} ${MAKE_FLAGS[*]}"
+echo ">>> make -j${JOBS} ${MAKE_GOALS} ${MAKE_FLAGS[*]}"
 if [ -n "$JEMALLOC_OPTS" ]; then
   echo ">>> JEMALLOC_CONFIGURE_OPTS=${JEMALLOC_OPTS}"
-  env JEMALLOC_CONFIGURE_OPTS="$JEMALLOC_OPTS" make -j"$JOBS" "${MAKE_FLAGS[@]}"
+  # shellcheck disable=SC2086
+  env JEMALLOC_CONFIGURE_OPTS="$JEMALLOC_OPTS" make -j"$JOBS" $MAKE_GOALS "${MAKE_FLAGS[@]}"
 else
-  make -j"$JOBS" "${MAKE_FLAGS[@]}"
+  # shellcheck disable=SC2086
+  make -j"$JOBS" $MAKE_GOALS "${MAKE_FLAGS[@]}"
 fi
 
 echo ">>> make install PREFIX=${PREFIX}"
@@ -223,6 +281,31 @@ done
 # 附带一份默认配置文件，便于对照线上 redis.conf
 [ -f "redis.conf" ] && cp -a redis.conf "${OUTDIR}/redis.conf.default"
 
+# ---------- 附带上游许可证（分发必需） ----------
+# Redis 8.x 为 RSALv2/SSPLv1/AGPLv3 三选一；7.4~7.8 为 RSALv2/SSPLv1；<=7.2 为 BSD-3-Clause。
+# 无论选择哪一种，分发二进制时都必须携带上游许可证原文，否则违反「不得移除许可声明」条款。
+LIC_FILE=""
+for _lic in LICENSE.txt COPYING LICENSE; do
+  if [ -f "$_lic" ]; then
+    cp -a "$_lic" "${OUTDIR}/LICENSE.redis.txt"
+    LIC_FILE="$_lic"
+    break
+  fi
+done
+# 供 BUILD-INFO.txt 使用的许可名称（按版本区间）
+if ver_ge "$REDIS_VERSION" "8.0.0"; then
+  LIC_NAME="RSALv2 / SSPLv1 / AGPLv3 (tri-license, at your option)"
+elif ver_ge "$REDIS_VERSION" "7.4.0"; then
+  LIC_NAME="RSALv2 / SSPLv1 (dual-license, at your option)"
+else
+  LIC_NAME="BSD-3-Clause"
+fi
+if [ -n "$LIC_FILE" ]; then
+  echo ">>> 已附带上游许可证: ${LIC_FILE} -> LICENSE.redis.txt"
+else
+  echo ">>> 警告：源码包内未找到上游许可证文件，产物将缺少许可证原文" >&2
+fi
+
 # ---------- 记录构建信息 ----------
 {
   echo "Redis version    : ${REDIS_VERSION}"
@@ -231,6 +314,9 @@ done
   echo "Allocator        : ${MALLOC}${JEMALLOC_OPTS:+ (JEMALLOC_CONFIGURE_OPTS=\"${JEMALLOC_OPTS}\")}"
   echo "TLS / systemd    : ${TLS} / ${SYSTEMD}"
   echo "Bundled modules  : ${MODULES}"
+  echo "Build system     : $([ "$NEW_BUILD_SYS" = "yes" ] && echo "top-level Makefile (>=8.10, goal: build redis / core-only)" || echo "legacy src/Makefile")"
+  echo "License (upstream): ${LIC_NAME}"
+  echo "License file     : LICENSE.redis.txt"
   echo "Compiler         : ${GCC_VER}"
   echo "Build host page  : ${LIB_PAGE_SIZE}"
   echo "Built at         : $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
