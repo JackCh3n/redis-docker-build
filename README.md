@@ -181,7 +181,7 @@ docker run --rm --platform linux/arm64 -v "$PWD/dist:/opt/dist" redis-builder:el
 | `--source-url` | `REDIS_SOURCE_URL` | （空） | 覆盖源码下载地址（内网离线镜像） |
 | `--smoke` | `REDIS_SMOKE` | `yes` | 构建后执行 PONG 冒烟测试 |
 
-Docker 镜像层可覆盖参数：`OS_MIRROR`（归档镜像）、`VAULT_PREFIX`、`DEVTOOLSET`、`DEVTOOLSET_MIRROR`、`INSTALL_OPT_DEPS`。
+Docker 镜像层可覆盖参数：`OS_MIRROR`（归档镜像）、`VAULT_PREFIX`、`DEVTOOLSET`、`DEVTOOLSET_MIRROR`（devtoolset 主源，默认 CDN）、`DEVTOOLSET_MIRROR_FALLBACK`（devtoolset 备用源）、`INSTALL_OPT_DEPS`。
 
 ## ARM64 / 银河麒麟专项说明
 
@@ -339,8 +339,13 @@ sudo systemctl start redis
 - **软件源**：CentOS 7 已 EOL，`vault.centos.org` 在部分网络（含国内政务内网）返回 403；
   本项目默认使用国内归档镜像重建源，已实测可用：阿里云（默认）、清华 TUNA、华为云、腾讯云。
   可通过 `--build-arg OS_MIRROR=<镜像根地址>` 切换，内网可指向自建镜像站。
-- **devtoolset 源**：`devtoolset-9 / 10 / 12` 在 x86_64 与 aarch64 上均由
-  `buildlogs.centos.org` 提供（含 repodata，可直接作为 yum 源）；`devtoolset-11` 无归档，故默认用 `-10`。
+- **devtoolset 源**：`devtoolset-9 / 10 / 12` 在 x86_64 与 aarch64 上均由 CentOS buildlogs
+  归档提供（含 repodata，可直接作为 yum 源）；`devtoolset-11` 无归档，故默认用 `-10`。
+  ⚠️ **必须使用 CDN 域名 `buildlogs.cdn.centos.org`**：主域名 `buildlogs.centos.org` 会对
+  RPM 包返回 **302 跳转**到 CDN，而 CentOS 7 自带的 yum 不跟随 302，会报
+  `HTTP Error 302 - Found` / `No more mirrors to try` 导致镜像构建失败（该 302 时有时无，
+  属间歇性故障）。本项目默认源已改为 CDN，并可通过 `--build-arg DEVTOOLSET_MIRROR=`、
+  `DEVTOOLSET_MIRROR_FALLBACK=` 自定义主源与备用源（主源失败时自动回退）。
 - **TLS 默认关闭**：容器内 OpenSSL 为 1.0.2k，产物会链接 `libssl.so.10`，在 glibc/OpenSSL
   较新的系统（如麒麟 V10）上可能缺少该库。需要 TLS 请用 `build-native.sh --tls yes` 原生编译，
   或先确认目标机存在 `libssl.so.10`。

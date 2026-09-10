@@ -43,6 +43,11 @@ Thanks for taking the time to contribute! 🎉
   archive mirror (`OS_MIRROR`) rather than hardcoding vault.centos.org.
 - devtoolset is required because Redis ≥ 6.0 needs C11 atomics; `devtoolset-11` has no
   aarch64 archive, so `devtoolset-10` is the default (overridable).
+- The devtoolset repo **must** point at the CDN host `buildlogs.cdn.centos.org`, not the
+  origin `buildlogs.centos.org`. The origin 302-redirects RPM requests to the CDN, and
+  CentOS 7's yum does not follow 302 → `HTTP Error 302 - Found` / `No more mirrors to try`.
+  The redirect is intermittent, which makes this a hard-to-reproduce failure. Keep
+  `DEVTOOLSET_MIRROR` (CDN) + `DEVTOOLSET_MIRROR_FALLBACK` and the retry loop intact.
 
 ## CI notes
 
