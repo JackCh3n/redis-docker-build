@@ -1,0 +1,290 @@
+# =============================================================================
+# redis-docker-build · GitHub Actions 构建流水线（多架构）
+#
+# 版本语义（主线 vs 稳定版）：
+#   - 主线版本：push 到 main 分支自动构建默认版本（x86_64 + aarch64），
+#     发布到固定 Release 标签 `latest`（每次覆盖更新）
+#   - 稳定版本：打 git tag（vRedis-7.2.16）触发，从 tag 名解析版本，
+#     发布到同名 tag（固化）
+#   - 手动触发：workflow_dispatch 可指定任意版本 / 分配器 / 架构 / TLS
+#
+# 架构说明：
+#   x86_64  -> ubuntu-latest 原生构建，基础镜像 centos:7.6.1810（glibc 2.17）
+#   aarch64 -> ubuntu-latest + QEMU 模拟构建，基础镜像 arm64v8/centos:7（glibc 2.17）
+#              产物可在 glibc >= 2.17 的 aarch64 系统运行，含银河麒麟 V10 SP3
+#
+#   加速提示：若仓库为 public，可把 aarch64 的 runner 直接改成
+#   `ubuntu-24.04-arm`（GitHub 免费原生 ARM runner），无需 QEMU，构建快数倍。
+# =============================================================================
+name: build-redis
+
+on:
+  workflow_dispatch:
+    inputs:
+      redis-version:
+        description: "Redis 版本号（如 7.2.16 / 8.10.1）"
+        required: false
+        default: "7.2.16"
+      malloc:
+        description: "内存分配器 auto|jemalloc|libc"
+        required: false
+        default: "auto"
+      tls:
+        description: "是否编译 TLS 支持 yes|no（aarch64 产物勿轻易开启，见 README）"
+        required: false
+        default: "no"
+      arch:
+        description: "构建架构 all|x86_64|aarch64"
+        required: false
+        default: "all"
+      smoke:
+        description: "是否执行 PONG 冒烟测试 yes|no"
+        required: false
+        default: "yes"
+  push:
+    branches: [main, master]
+    tags: ["vRedis-*"]
+
+permissions:
+  contents: write
+
+jobs:
+  # ── 解析构建场景与版本（供矩阵复用） ──────────────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      scene: ${{ steps.resolve.outputs.scene }}
+      version: ${{ steps.resolve.outputs.version }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      malloc: ${{ steps.resolve.outputs.malloc }}
+      tls: ${{ steps.resolve.outputs.tls }}
+      smoke: ${{ steps.resolve.outputs.smoke }}
+    steps:
+      - id: resolve
+        name: 解析场景与版本
+        run: |
+          set -e
+          DEFAULT_VERSION="7.2.16"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ github.event.inputs.redis-version }}"; V="${V:-$DEFAULT_VERSION}"
+            M="${{ github.event.inputs.malloc }}"; M="${M:-auto}"
+            T="${{ github.event.inputs.tls }}"; T="${T:-no}"
+            S="${{ github.event.inputs.smoke }}"; S="${S:-yes}"
+            echo "scene=dispatch"          >> "$GITHUB_OUTPUT"
+            echo "version=$V"              >> "$GITHUB_OUTPUT"
+            echo "release_tag=vRedis-$V"   >> "$GITHUB_OUTPUT"
+            echo "malloc=$M"               >> "$GITHUB_OUTPUT"
+            echo "tls=$T"                  >> "$GITHUB_OUTPUT"
+            echo "smoke=$S"                >> "$GITHUB_OUTPUT"
+            echo ">>> 场景: 手动构建，版本=$V"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            REF="${{ github.ref_name }}"
+            case "$REF" in
+              vRedis-*) V="${REF#vRedis-}" ;;
+              *) echo "::error::未知 tag 格式: $REF（应为 vRedis-x.y.z）"; exit 1 ;;
+            esac
+            echo "scene=tag"               >> "$GITHUB_OUTPUT"
+            echo "version=$V"              >> "$GITHUB_OUTPUT"
+            echo "release_tag=$REF"        >> "$GITHUB_OUTPUT"
+            echo "malloc=auto"             >> "$GITHUB_OUTPUT"
+            echo "tls=no"                  >> "$GITHUB_OUTPUT"
+            echo "smoke=yes"               >> "$GITHUB_OUTPUT"
+            echo ">>> 场景: 稳定版构建，tag=$REF，版本=$V"
+          else
+            echo "scene=mainline"              >> "$GITHUB_OUTPUT"
+            echo "version=$DEFAULT_VERSION"    >> "$GITHUB_OUTPUT"
+            echo "release_tag=latest"          >> "$GITHUB_OUTPUT"
+            echo "malloc=auto"                 >> "$GITHUB_OUTPUT"
+            echo "tls=no"                      >> "$GITHUB_OUTPUT"
+            echo "smoke=yes"                   >> "$GITHUB_OUTPUT"
+            echo ">>> 场景: 主线构建，版本=$DEFAULT_VERSION"
+          fi
+
+  # ── 构建（矩阵：x86_64 + aarch64） ─────────────────────────────────
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            base_image: centos:7.6.1810
+            platform: linux/amd64
+            qemu: "false"
+          - arch: aarch64
+            base_image: arm64v8/centos:7
+            platform: linux/arm64
+            qemu: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 架构过滤（workflow_dispatch 可只构建单一架构）
+        id: filter
+        run: |
+          WANT="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.arch || 'all' }}"
+          WANT="${WANT:-all}"
+          if [ "$WANT" = "all" ] || [ "$WANT" = "${{ matrix.arch }}" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo ">>> 跳过 ${{ matrix.arch }}（本次只构建 $WANT）"
+          fi
+
+      # aarch64 在 x86_64 runner 上需要 QEMU
+      - name: 注册 QEMU（aarch64）
+        if: steps.filter.outputs.skip == 'false' && matrix.qemu == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: 准备 buildx
+        if: steps.filter.outputs.skip == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建编译镜像（EL7 + devtoolset-10）
+        if: steps.filter.outputs.skip == 'false'
+        run: |
+          set -e
+          OPTS=""
+          if [ "${{ needs.prepare.outputs.tls }}" = "yes" ] || [ "${{ needs.prepare.outputs.smoke }}" = "yes" ]; then
+            OPTS="--build-arg INSTALL_OPT_DEPS=${{ needs.prepare.outputs.tls == 'yes' && 'yes' || 'no' }}"
+          fi
+          echo ">>> 镜像参数: $OPTS"
+          docker buildx build \
+            --platform ${{ matrix.platform }} \
+            --build-arg BASE_IMAGE=${{ matrix.base_image }} \
+            $OPTS \
+            -t redis-builder:el7 --load .
+
+      - name: 编译 Redis ${{ needs.prepare.outputs.version }}（${{ matrix.arch }}）
+        if: steps.filter.outputs.skip == 'false'
+        run: |
+          set -e
+          mkdir -p dist
+          docker run --rm --platform ${{ matrix.platform }} \
+            -v "$PWD/dist:/opt/dist" \
+            redis-builder:el7 \
+            --redis-version "${{ needs.prepare.outputs.version }}" \
+            --malloc "${{ needs.prepare.outputs.malloc }}" \
+            --tls "${{ needs.prepare.outputs.tls }}" \
+            --smoke "${{ needs.prepare.outputs.smoke }}" \
+            --output /opt/dist
+
+      - name: 展示构建信息
+        if: steps.filter.outputs.skip == 'false'
+        run: |
+          set -e
+          for d in dist/*/; do
+            echo "===== $d ====="
+            cat "${d}BUILD-INFO.txt" 2>/dev/null | head -n 40 || true
+          done
+
+      - name: 打包
+        if: steps.filter.outputs.skip == 'false'
+        run: |
+          set -e
+          cd dist
+          for d in */; do tar czf "${d%/}.tar.gz" "${d%/}"; done
+          ls -lh *.tar.gz
+
+      - name: 上传产物（Workflow Artifact）
+        if: steps.filter.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: redis-binaries-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          retention-days: 30
+
+  # ── 汇总发布 Release ──────────────────────────────────────────────
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载全部架构产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCENE: ${{ needs.prepare.outputs.scene }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          MALLOC: ${{ needs.prepare.outputs.malloc }}
+          TLS_FLAG: ${{ needs.prepare.outputs.tls }}
+        run: |
+          set -e
+          ls -lh artifacts
+
+          X64="redis-${VERSION}-x86_64.tar.gz"
+          ARM="redis-${VERSION}-aarch64.tar.gz"
+          FILES=""
+          for f in "$X64" "$ARM"; do
+            if [ -f "artifacts/$f" ]; then
+              cp "artifacts/$f" "$f"
+              FILES="$FILES $f"
+            else
+              echo ">>> 未找到 $f，跳过"
+            fi
+          done
+          if [ -z "$FILES" ]; then
+            echo "::error::没有任何产物可发布"
+            exit 1
+          fi
+
+          case "$SCENE" in
+            mainline) TITLE="Mainline (latest)" ;;
+            tag)      TITLE="Stable Redis ${VERSION}" ;;
+            *)        TITLE="Redis ${VERSION}" ;;
+          esac
+
+          cat > notes.md <<EOF
+          ## ${TITLE}
+
+          Redis Open Source ${VERSION}, built in a Docker-simulated CentOS 7 (glibc 2.17) environment.
+
+          | Arch | Asset | Runs on |
+          |------|-------|---------|
+          | x86_64 | ${X64} | CentOS 7.6 / 7.9 及更高 |
+          | aarch64 | ${ARM} | glibc >= 2.17 的 aarch64（含银河麒麟 V10 SP3） |
+
+          - Allocator: \`${MALLOC}\`（aarch64 使用 jemalloc \`--with-lg-page=16\` 以兼容 4KB/64KB 页）
+          - TLS: \`${TLS_FLAG}\`
+          - Toolchain: CentOS 7 vault 归档源 + devtoolset-10（GCC 10.2）
+          - Each tarball contains BUILD-INFO.txt（含 \`redis-server --version\`、glibc 符号上限、ldd、冒烟测试结果）
+
+          ⚠️ Redis 8.x 起为 RSALv2 / SSPLv1 / AGPLv3 三选一许可；7.2.x 及更早为 BSD-3-Clause。
+          EOF
+
+          publish() {
+            local tag="$1"
+            if gh release view "$tag" --json id -q .id >/dev/null 2>&1; then
+              echo ">>> Release $tag 已存在，更新附件"
+              gh release view "$tag" --json assets -q '.assets[]?.name' | while read -r f; do
+                [ -z "$f" ] && continue
+                aid=$(gh release view "$tag" --json assets -q ".assets[] | select(.name==\"$f\") | .id")
+                gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${aid}" >/dev/null 2>&1 || true
+              done
+              for f in $FILES; do gh release upload "$tag" "$f" --clobber; done
+              gh release edit "$tag" --title "$TITLE" --notes-file notes.md --draft=false
+            else
+              # shellcheck disable=SC2086
+              gh release create "$tag" $FILES --title "$TITLE" --notes-file notes.md --target "$GITHUB_SHA"
+            fi
+          }
+
+          if [ "$SCENE" = "mainline" ]; then
+            publish "latest"
+          else
+            publish "$RELEASE_TAG"
+          fi
+
+      - name: 汇总
+        run: |
+          echo "场景        : $SCENE"
+          echo "Redis 版本  : $VERSION"
+          echo "Release     : $RELEASE_TAG"
+          ls -lh *.tar.gz 2>/dev/null || true

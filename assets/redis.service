@@ -1,0 +1,54 @@
+# =============================================================
+# Redis systemd 单元模板（源码编译安装场景）
+#
+# 部署步骤：
+#   sudo useradd -r -s /sbin/nologin redis
+#   sudo mkdir -p /var/lib/redis /var/log/redis /etc/redis
+#   sudo cp assets/redis.service /etc/systemd/system/redis.service
+#   sudo cp assets/redis.conf.example  /etc/redis/redis.conf
+#   sudo chown -R redis:redis /var/lib/redis /var/log/redis /etc/redis
+#   sudo chmod 640 /etc/redis/redis.conf
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now redis
+#
+# 注意：请按实际安装路径修改 ExecStart 的二进制路径与配置文件路径。
+# =============================================================
+[Unit]
+Description=Redis In-Memory Data Store
+Documentation=https://redis.io/documentation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=redis
+Group=redis
+# 二进制路径：对应 make install PREFIX=/usr/local 的产物
+ExecStart=/usr/local/bin/redis-server /etc/redis/redis.conf --supervised systemd
+ExecStop=/usr/local/bin/redis-cli -a ${REDIS_PASSWORD} shutdown
+# 平滑重载配置（RDB 持久化时会 fork，需保证内存余量）
+ExecReload=/bin/kill -USR2 $MAINPID
+
+# 目录与权限
+WorkingDirectory=/var/lib/redis
+RuntimeDirectory=redis
+RuntimeDirectoryMode=0755
+
+# 安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/redis /var/log/redis
+
+# 资源限制
+LimitNOFILE=65535
+LimitNPROC=65535
+# 允许内存锁定（若 redis.conf 配置了 maxmemory 与 vm.overcommit 相关策略）
+# LimitMEMLOCK=infinity
+
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

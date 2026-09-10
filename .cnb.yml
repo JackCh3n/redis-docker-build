@@ -1,0 +1,197 @@
+# =============================================================================
+# redis-docker-build · CNB (cnb.cool) 云原生构建流水线
+#
+# 说明：CNB 构建节点为 x86_64，本流水线只构建 **x86_64** 产物（CentOS 7.6 兼容）。
+#       aarch64（银河麒麟 V10 SP3 / 鲲鹏）产物请使用 GitHub Actions 流水线，
+#       或在 aarch64 机器上直接执行 ./build-native.sh。
+#
+# 版本语义（与 GitHub Actions 一致）：
+#   - 主线版本：main / master 分支 push 自动构建默认版本，发布到固定 Release `latest`
+#   - 稳定版本：打 git tag（vRedis-7.2.16）触发 tag_push，从 tag 名解析版本，
+#     只构建该版本，发布到同名 tag（固化）
+#
+# 结构说明：CNB 的 tag_push 是顶级事件（与 main:/master: 平级）；
+#           构建容器由本仓库 Dockerfile 构建。
+# =============================================================================
+
+# ── 公共构建环境（YAML 锚点复用） ──────────────────────────────────────────
+.build-env: &build-env
+  docker:
+    build:
+      dockerfile: Dockerfile   # CentOS 7.6.1810 + devtoolset-10 编译环境
+      by:                      # 缓存 key 文件：依赖变更时重建环境
+        - Dockerfile
+        - build-redis.sh
+    buildArgs:
+      BASE_IMAGE: centos:7.6.1810
+
+# 默认 Redis 版本（主线构建用）
+#   7.2.16 = 最后一个 BSD-3-Clause 版本，生产推荐
+#   8.10.1 = 当前最新版（RSALv2/SSPLv1/AGPLv3 三许可），可用 tag 手动发布
+.vars: &vars
+  REDIS_VERSION: "7.2.16"
+
+# ── 主线 stages（main/master 共用） ─────────────────────────────────────────
+.mainline-stages: &mainline-stages
+  - name: build-redis
+    script: |
+      set -e
+      bash /usr/local/bin/build-redis.sh \
+        --redis-version "${REDIS_VERSION:-7.2.16}" \
+        --malloc auto \
+        --smoke yes \
+        --output "$PWD/dist"
+  - name: list-and-check
+    script: |
+      set -e
+      ls -lhR dist/
+      for d in dist/*/; do
+        echo "===== $d ====="
+        cat "${d}BUILD-INFO.txt" 2>/dev/null | head -n 30 || true
+      done
+  - name: package
+    script: |
+      set -e
+      cd dist
+      for d in */; do tar czf "${d%/}.tar.gz" "${d%/}"; done
+      ls -lh *.tar.gz
+  - name: gen-notes
+    script: |
+      # 生成到工作区相对路径 RELEASE_NOTES.md，git:release 插件在工作区读取
+      cat > RELEASE_NOTES.md <<EOF
+      ## Mainline (latest)
+
+      Auto-built on every push. Rolling update.
+
+      | Type | Version | File |
+      |------|---------|------|
+      | Redis (x86_64) | ${REDIS_VERSION:-7.2.16} | redis-${REDIS_VERSION:-7.2.16}-x86_64.tar.gz |
+
+      Build env: Docker CentOS 7.6.1810 (glibc 2.17) + devtoolset-10 (GCC 10.2)
+      Runs on: CentOS 7.6 / 7.9 and later x86_64
+      License: Redis 7.2.x = BSD-3-Clause
+      EOF
+  - name: create-release
+    type: git:release
+    options:
+      tag: latest
+      title: Mainline (latest)
+      descriptionFromFile: RELEASE_NOTES.md
+      latest: true
+    exports:
+      version: latest
+  - name: upload-attachments
+    image: cnbcool/attachments:latest
+    settings:
+      tag: latest
+      attachments:
+        - "./dist/*.tar.gz"
+
+# ── 稳定版 stages（tag_push 共用） ──────────────────────────────────────────
+.stable-stages: &stable-stages
+  - name: resolve-tag
+    script: |
+      set -e
+      TAG="${CNB_BRANCH:-${CI_COMMIT_TAG:-}}"
+      echo ">>> 触发 tag: ${TAG}"
+      case "$TAG" in
+        vRedis-*)
+          echo "##[set-output TAG=${TAG}]"
+          echo "##[set-output VERSION=${TAG#vRedis-}]"
+          ;;
+        *)
+          echo ">>> 忽略非版本 tag: ${TAG}"
+          exit 0
+          ;;
+      esac
+    exports:
+      TAG: TAG_NAME
+      VERSION: BUILD_VERSION
+  - name: build-stable-binary
+    script: |
+      set -e
+      echo ">>> 构建 Redis 版本: ${BUILD_VERSION}"
+      bash /usr/local/bin/build-redis.sh \
+        --redis-version "${BUILD_VERSION}" \
+        --malloc auto \
+        --smoke yes \
+        --output "$PWD/dist"
+  - name: list-and-check
+    script: |
+      set -e
+      ls -lhR dist/
+      for d in dist/*/; do
+        echo "===== $d ====="
+        cat "${d}BUILD-INFO.txt" 2>/dev/null | head -n 30 || true
+      done
+  - name: package
+    script: |
+      set -e
+      cd dist
+      for d in */; do tar czf "${d%/}.tar.gz" "${d%/}"; done
+      ls -lh *.tar.gz
+  - name: gen-notes
+    script: |
+      # 注意：不用 heredoc（YAML 缩进会导致 EOF 结束符不在行首，bash 报 syntax error），改用 printf
+      printf '## Stable Redis %s\n\nTriggered by git tag %s. Fixed version.\n\n- Asset: redis-%s-x86_64.tar.gz\n- Arch: x86_64 (CentOS 7.6 / 7.9 compatible, glibc 2.17)\n- Build env: Docker CentOS 7.6.1810 + devtoolset-10 (GCC 10.2)\n' \
+        "${BUILD_VERSION}" "${TAG_NAME}" "${BUILD_VERSION}" > RELEASE_NOTES.md
+  - name: create-release
+    script: |
+      set -e
+      echo ">>> 幂等创建 Release: ${TAG_NAME}"
+      # 重要：CNB API 的 GET/POST 都必须带 Accept: application/vnd.cnb.api+json 头，
+      # 只带 Content-Type 会返回 406
+      EXIST=$(curl -s -m 30 \
+        -H "Authorization: Bearer ${CNB_TOKEN}" \
+        -H "Accept: application/vnd.cnb.api+json" \
+        "https://api.cnb.cool/${CNB_REPO_SLUG}/-/releases" \
+        | grep -c "\"tag_name\":\"${TAG_NAME}\"" || true)
+      if [ "${EXIST}" != "0" ]; then
+        echo ">>> Release ${TAG_NAME} 已存在，跳过创建（附件由 upload 阶段更新）"
+      else
+        BODY=$(sed ':a;N;$!ba;s/"/\\"/g;s/\n/\\n/g' RELEASE_NOTES.md)
+        HTTP=$(curl -s -o /tmp/rel.json -w "%{http_code}" -m 30 \
+          -X POST \
+          -H "Authorization: Bearer ${CNB_TOKEN}" \
+          -H "Content-Type: application/json" \
+          -H "Accept: application/vnd.cnb.api+json" \
+          "https://api.cnb.cool/${CNB_REPO_SLUG}/-/releases" \
+          -d "{\"tag_name\":\"${TAG_NAME}\",\"name\":\"Stable ${TAG_NAME}\",\"body\":\"${BODY}\",\"draft\":false,\"prerelease\":false}")
+        echo ">>> 创建 Release 结果: HTTP ${HTTP}"
+        cat /tmp/rel.json 2>/dev/null | head -c 300 || true
+        echo
+        if [ "$HTTP" != "200" ] && [ "$HTTP" != "201" ]; then
+          echo "!!! Release 创建失败（HTTP ${HTTP}）"
+          exit 1
+        fi
+      fi
+  - name: upload-attachments
+    image: cnbcool/attachments:latest
+    settings:
+      tag: $TAG_NAME
+      attachments:
+        - "./dist/*.tar.gz"
+
+# ── 主线：main / master 分支 push ───────────────────────────────────────────
+main:
+  push:
+    - name: build-mainline
+      <<: *build-env
+      env:
+        <<: *vars
+      stages: *mainline-stages
+
+master:
+  push:
+    - name: build-mainline
+      <<: *build-env
+      env:
+        <<: *vars
+      stages: *mainline-stages
+
+# ── 稳定版：git tag 推送 ────────────────────────────────────────────────────
+$:
+  tag_push:
+    - name: build-stable
+      <<: *build-env
+      stages: *stable-stages

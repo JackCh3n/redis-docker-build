@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+# =============================================================
+# build-redis.sh — 容器内 / 目标机 Redis 参数化构建脚本（核心）
+#
+# 既可在 Docker 容器内运行（由 Dockerfile ENTRYPOINT 调用），
+# 也可在任意具备编译环境的 Linux 上直接运行。
+#
+# 用法示例：
+#   docker run --rm -v /opt/redis-dist:/opt/dist redis-builder:7.6 \
+#     --redis-version 7.2.16
+#
+#   docker run --rm -v /opt/redis-dist:/opt/dist redis-builder:7.6 \
+#     --redis-version 8.10.1 --malloc jemalloc --tls yes --smoke yes
+#
+# 参数（均可换成同名环境变量，命令行优先级更高）：
+#   --redis-version  Redis 版本号            (默认 7.2.16)
+#   --prefix         安装前缀 make install PREFIX= (默认 /usr/local)
+#   --output         产物输出目录            (默认 /opt/dist)
+#   --malloc         内存分配器 auto|jemalloc|libc (默认 auto)
+#   --tls            是否编译 TLS 支持 yes|no   (默认 no，需 openssl-devel)
+#   --systemd        是否编译 systemd 支持 yes|no (默认 no，需 systemd-devel)
+#   --modules        是否编译 8.x 内置模块 yes|no (默认 no，需 Rust 与网络)
+#   --lg-page        jemalloc 最大页大小 log2，aarch64 默认 16（支持 64KB 页）
+#   --prog-suffix    程序名后缀（PROG_SUFFIX），默认空
+#   --jobs           编译并行数              (默认 nproc)
+#   --source-url     覆盖源码下载地址（内网离线镜像用）
+#   --smoke          构建后是否做 PONG 冒烟测试 yes|no (默认 yes)
+#
+# 关于内存分配器与 ARM 大页（重要）
+# ------------------------------------------
+# jemalloc 会把「构建机的页大小」作为支持的页大小上限写死进二进制。
+# ARM64 服务器常见 64KB 页（getconf PAGESIZE = 65536），若在 4KB 页机器上
+# 编译，运行时会报 "<jemalloc>: unsupported system page size" 而启动失败。
+# 处理方式：
+#   * Redis >= 7.0：传 JEMALLOC_CONFIGURE_OPTS="--with-lg-page=16"（本脚本自动，
+#     aarch64 默认 16），jemalloc 即同时支持 4KB / 64KB 页。
+#   * Redis < 7.0 ：该变量不存在，aarch64 上默认改用 libc 分配器（安全优先）。
+#   * 仍不放心可显式 --malloc libc，彻底规避页大小问题（碎片率略高）。
+# =============================================================
+set -euo pipefail
+
+REDIS_VERSION="${REDIS_VERSION:-7.2.16}"
+PREFIX="${REDIS_PREFIX:-/usr/local}"
+OUTPUT="${OUTPUT_DIR:-/opt/dist}"
+MALLOC="${REDIS_MALLOC:-auto}"
+TLS="${REDIS_TLS:-no}"
+SYSTEMD="${REDIS_SYSTEMD:-no}"
+MODULES="${REDIS_MODULES:-no}"
+LG_PAGE="${REDIS_LG_PAGE:-}"
+PROG_SUFFIX="${REDIS_PROG_SUFFIX:-}"
+SOURCE_URL="${REDIS_SOURCE_URL:-}"
+SMOKE="${REDIS_SMOKE:-yes}"
+
+# bash 4.2 (CentOS 7) 在 set -u 下，${VAR:-$(cmd)} 会误报 unbound variable，故拆开
+JOBS="${REDIS_JOBS-}"
+if [ -z "$JOBS" ]; then
+  JOBS="$(nproc 2>/dev/null || echo 1)"
+fi
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --redis-version) REDIS_VERSION="$2"; shift 2 ;;
+    --prefix)        PREFIX="$2";        shift 2 ;;
+    --output)        OUTPUT="$2";        shift 2 ;;
+    --malloc)        MALLOC="$2";        shift 2 ;;
+    --tls)           TLS="$2";           shift 2 ;;
+    --systemd)       SYSTEMD="$2";       shift 2 ;;
+    --modules)       MODULES="$2";       shift 2 ;;
+    --lg-page)       LG_PAGE="$2";       shift 2 ;;
+    --prog-suffix)   PROG_SUFFIX="$2";   shift 2 ;;
+    --jobs)          JOBS="$2";          shift 2 ;;
+    --source-url)    SOURCE_URL="$2";    shift 2 ;;
+    --smoke)         SMOKE="$2";         shift 2 ;;
+    *) echo "[ERROR] 未知参数: $1" >&2; exit 1 ;;
+  esac
+done
+
+# ---------- 基础信息探测 ----------
+ARCH_RAW="$(uname -m)"
+case "$ARCH_RAW" in
+  x86_64|amd64)   ARCH="x86_64" ;;
+  aarch64|arm64)  ARCH="aarch64" ;;
+  *)              ARCH="$ARCH_RAW" ;;
+esac
+
+# 版本比较：ver_ge A B -> A >= B 时返回 0
+ver_ge() {
+  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]
+}
+
+LIB_PAGE_SIZE="$(getconf PAGESIZE 2>/dev/null || echo unknown)"
+GCC_VER="$( (gcc -dumpfullversion -dumpversion 2>/dev/null || gcc --version 2>/dev/null | head -1) | head -1)"
+
+echo "=============================================="
+echo " Redis 构建配置"
+echo "  redis 版本    : ${REDIS_VERSION}"
+echo "  目标架构      : ${ARCH} (构建机: ${ARCH_RAW})"
+echo "  安装前缀      : ${PREFIX}"
+echo "  产物目录      : ${OUTPUT}"
+echo "  内存分配器    : ${MALLOC}"
+echo "  TLS / systemd : ${TLS} / ${SYSTEMD}"
+echo "  内置模块      : ${MODULES}"
+echo "  编译并行数    : ${JOBS}"
+echo "  编译器        : ${GCC_VER}"
+echo "  构建机页大小  : ${LIB_PAGE_SIZE}"
+echo "=============================================="
+
+# ---------- 编译器版本前置校验 ----------
+# Redis >= 6.0 需要 C11 原子操作（stdatomic），GCC 必须 >= 4.9（建议 >= 5.3）
+if ver_ge "$REDIS_VERSION" "6.0.0"; then
+  GCC_NUM="$(echo "$GCC_VER" | grep -oE '^[0-9]+\.[0-9]+' || echo 0.0)"
+  if [ "$(printf '%s\n%s\n' "5.1" "$GCC_NUM" | sort -V | head -n 1)" != "5.1" ]; then
+    echo "[ERROR] Redis ${REDIS_VERSION} 需要 C11（stdatomic），GCC 需 >= 5.1，当前为 ${GCC_VER}" >&2
+    echo "        提示：CentOS 7 请启用 devtoolset，例如 scl enable devtoolset-10 bash" >&2
+    exit 1
+  fi
+fi
+
+# ---------- 分配器与页大小推导 ----------
+if [ "$MALLOC" = "auto" ]; then
+  if [ "$ARCH" = "aarch64" ] && ! ver_ge "$REDIS_VERSION" "7.0.0"; then
+    # Redis < 7.0 不支持 JEMALLOC_CONFIGURE_OPTS，ARM 上无法安全适配 64KB 页
+    MALLOC="libc"
+    echo ">>> [auto] aarch64 + Redis < 7.0：为避免 64KB 大页崩溃，改用 libc 分配器"
+  else
+    MALLOC="jemalloc"
+  fi
+fi
+case "$MALLOC" in
+  jemalloc|libc) ;;
+  *) echo "[ERROR] --malloc 只能是 auto / jemalloc / libc" >&2; exit 1 ;;
+esac
+
+JEMALLOC_OPTS=""
+if [ "$MALLOC" = "jemalloc" ]; then
+  if [ -z "$LG_PAGE" ]; then
+    if [ "$ARCH" = "aarch64" ]; then LG_PAGE=16; else LG_PAGE=12; fi
+  fi
+  # JEMALLOC_CONFIGURE_OPTS 自 Redis 7.0 起支持
+  if ver_ge "$REDIS_VERSION" "7.0.0"; then
+    JEMALLOC_OPTS="--with-lg-page=${LG_PAGE}"
+  else
+    echo ">>> 注意：Redis ${REDIS_VERSION} 不支持 --with-lg-page，jemalloc 按构建机页大小编译"
+  fi
+fi
+
+# ---------- 下载源码 ----------
+mkdir -p "$OUTPUT" /opt/src 2>/dev/null || true
+cd /opt/src
+SRC_DIR="redis-${REDIS_VERSION}"
+
+if [ ! -f "${SRC_DIR}.tar.gz" ]; then
+  echo ">>> 下载 Redis ${REDIS_VERSION} 源码"
+  URLS=()
+  [ -n "$SOURCE_URL" ] && URLS+=("$SOURCE_URL")
+  URLS+=("https://download.redis.io/releases/redis-${REDIS_VERSION}.tar.gz")
+  URLS+=("https://codeload.github.com/redis/redis/tar.gz/refs/tags/${REDIS_VERSION}")
+  ok=0
+  for u in "${URLS[@]}"; do
+    echo "    - 尝试 ${u}"
+    if wget -q -T 300 -O "${SRC_DIR}.tar.gz" "$u"; then ok=1; break; fi
+  done
+  if [ "$ok" != "1" ]; then
+    echo "[ERROR] Redis ${REDIS_VERSION} 源码下载失败，请检查网络或用 --source-url 指定内网镜像" >&2
+    exit 1
+  fi
+fi
+
+rm -rf "$SRC_DIR"
+tar xzf "${SRC_DIR}.tar.gz"
+# GitHub 归档解压出的目录名可能不同，做一次归一化
+if [ ! -d "$SRC_DIR" ]; then
+  EXTRACTED="$(find . -maxdepth 1 -type d -name 'redis-*' | head -n 1)"
+  [ -n "$EXTRACTED" ] && mv "$EXTRACTED" "$SRC_DIR"
+fi
+[ -d "$SRC_DIR" ] || { echo "[ERROR] 源码解压目录未找到" >&2; exit 1; }
+cd "$SRC_DIR"
+
+# ---------- 组装 make 参数 ----------
+MAKE_FLAGS=("MALLOC=${MALLOC}")
+if [ "$TLS" = "yes" ]; then
+  if ver_ge "$REDIS_VERSION" "6.0.0"; then
+    MAKE_FLAGS+=("BUILD_TLS=yes")
+  else
+    echo ">>> 注意：Redis ${REDIS_VERSION} 不支持 BUILD_TLS（TLS 自 6.0 引入），已忽略"
+  fi
+fi
+[ "$SYSTEMD" = "yes" ] && MAKE_FLAGS+=("USE_SYSTEMD=yes")
+[ "$MODULES" = "yes" ] && MAKE_FLAGS+=("BUILD_WITH_MODULES=yes")
+[ -n "$PROG_SUFFIX" ]  && MAKE_FLAGS+=("PROG_SUFFIX=${PROG_SUFFIX}")
+
+# ---------- 编译 ----------
+echo ">>> make distclean"
+make distclean >/dev/null 2>&1 || true
+
+echo ">>> make -j${JOBS} ${MAKE_FLAGS[*]}"
+if [ -n "$JEMALLOC_OPTS" ]; then
+  echo ">>> JEMALLOC_CONFIGURE_OPTS=${JEMALLOC_OPTS}"
+  env JEMALLOC_CONFIGURE_OPTS="$JEMALLOC_OPTS" make -j"$JOBS" "${MAKE_FLAGS[@]}"
+else
+  make -j"$JOBS" "${MAKE_FLAGS[@]}"
+fi
+
+echo ">>> make install PREFIX=${PREFIX}"
+make install PREFIX="$PREFIX"
+
+# ---------- 收集产物 ----------
+OUTDIR="${OUTPUT}/redis-${REDIS_VERSION}-${ARCH}"
+mkdir -p "$OUTDIR"
+
+BIN_DIR="${PREFIX}/bin"
+[ -d "$BIN_DIR" ] || BIN_DIR="${PREFIX}/sbin"
+[ -d "$BIN_DIR" ] || { echo "[ERROR] 未找到安装后的可执行文件目录（${PREFIX}/bin）" >&2; exit 1; }
+
+for f in redis-server redis-cli redis-benchmark redis-sentinel redis-check-rdb redis-check-aof; do
+  if [ -e "${BIN_DIR}/${f}" ]; then
+    cp -a "${BIN_DIR}/${f}" "${OUTDIR}/${f}"
+  elif [ -e "${SRC_DIR}/src/${f}" ]; then
+    cp -a "${SRC_DIR}/src/${f}" "${OUTDIR}/${f}"
+  fi
+done
+
+# 附带一份默认配置文件，便于对照线上 redis.conf
+[ -f "redis.conf" ] && cp -a redis.conf "${OUTDIR}/redis.conf.default"
+
+# ---------- 记录构建信息 ----------
+{
+  echo "Redis version    : ${REDIS_VERSION}"
+  echo "Target arch      : ${ARCH}"
+  echo "Built on         : $( (. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME}") || echo unknown ) ($(uname -r))"
+  echo "Allocator        : ${MALLOC}${JEMALLOC_OPTS:+ (JEMALLOC_CONFIGURE_OPTS=\"${JEMALLOC_OPTS}\")}"
+  echo "TLS / systemd    : ${TLS} / ${SYSTEMD}"
+  echo "Bundled modules  : ${MODULES}"
+  echo "Compiler         : ${GCC_VER}"
+  echo "Build host page  : ${LIB_PAGE_SIZE}"
+  echo "Built at         : $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo
+  echo "--- redis-server --version ---"
+  "${OUTDIR}/redis-server" --version 2>&1 || true
+  echo
+  echo "--- glibc requirement (max GLIBC_ version) ---"
+  if command -v objdump >/dev/null 2>&1; then
+    objdump -T "${OUTDIR}/redis-server" 2>/dev/null | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -1 || true
+  fi
+  echo
+  echo "--- ldd ---"
+  if command -v ldd >/dev/null 2>&1; then
+    ldd "${OUTDIR}/redis-server" 2>&1 || true
+  fi
+} > "${OUTDIR}/BUILD-INFO.txt" 2>&1
+
+# ---------- 冒烟测试（PONG）----------
+if [ "$SMOKE" = "yes" ]; then
+  echo ">>> 冒烟测试：启动实例并 PING"
+  PORT="${SMOKE_PORT:-16399}"
+  TMPDIR_S="$(mktemp -d)"
+  smoke_ok=no
+  # --save '' 关闭 RDB 落盘，避免污染工作目录
+  if "${OUTDIR}/redis-server" --port "$PORT" --save '' --appendonly no \
+       --daemonize yes --pidfile "${TMPDIR_S}/redis.pid" \
+       --logfile "${TMPDIR_S}/redis.log" --dir "$TMPDIR_S" 2>"${TMPDIR_S}/start.err"; then
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      sleep 1
+      resp="$("${OUTDIR}/redis-cli" -p "$PORT" ping 2>/dev/null || true)"
+      [ "$resp" = "PONG" ] && { smoke_ok=yes; break; }
+    done
+    "${OUTDIR}/redis-cli" -p "$PORT" shutdown nosave >/dev/null 2>&1 || true
+  fi
+  {
+    echo
+    echo "--- smoke test (PING => PONG) ---"
+    echo "result: ${smoke_ok}"
+    [ -f "${TMPDIR_S}/redis.log" ] && tail -n 20 "${TMPDIR_S}/redis.log"
+  } >> "${OUTDIR}/BUILD-INFO.txt"
+  rm -rf "$TMPDIR_S"
+  if [ "$smoke_ok" != "yes" ]; then
+    echo "[ERROR] 冒烟测试失败：redis-server 未能正常响应 PING" >&2
+    cat "${OUTDIR}/BUILD-INFO.txt" >&2 || true
+    exit 1
+  fi
+  echo ">>> 冒烟测试通过（PONG）"
+fi
+
+echo "=============================================="
+echo " 构建成功"
+echo " 产物目录: ${OUTDIR}"
+ls -la "${OUTDIR}"
+echo "=============================================="
+
+# 便于 CI 直接引用
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  echo "artifact_dir=${OUTDIR}" >> "$GITHUB_OUTPUT"
+fi

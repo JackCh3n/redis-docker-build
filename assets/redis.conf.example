@@ -1,0 +1,118 @@
+# =============================================================
+# redis.conf 生产参考配置（源码编译安装 + CentOS 7 / 银河麒麟 V10 SP3）
+#
+# 本文件是「安全基线 + 性能基线」的参考模板，不是完整配置。
+# 请与线上实际 redis.conf 逐项比对后再替换，避免覆盖已有业务配置。
+#
+# 完整默认配置见源码包内 redis.conf（构建产物中也会附带 redis.conf.default）。
+# =============================================================
+
+################################## 网络 ####################################
+# 生产务必绑定具体网卡地址（不要 0.0.0.0 裸奔），并按需配合防火墙/安全组
+bind 127.0.0.1 192.168.1.10
+
+# 端口与保护模式
+port 6379
+protected-mode yes
+tcp-backlog 511
+
+# 空闲连接超时（秒），0 表示不断开
+timeout 300
+tcp-keepalive 300
+
+################################## 通用 ####################################
+# 以 systemd 方式托管时保持 no；直接前台运行时可用 yes
+daemonize no
+supervised systemd
+pidfile /var/run/redis/redis-server.pid
+
+loglevel notice
+logfile /var/log/redis/redis-server.log
+
+# 数据库数量
+databases 16
+
+################################ 持久化 RDB #################################
+# 生产建议：RDB + AOF 同时开启，或按业务对丢数据容忍度单独选择
+# 900 秒内至少 1 个 key 变化 -> 保存
+save 900 1
+save 300 10
+save 60 10000
+stop-writes-on-bgsave-error yes
+rdbcompression yes
+rdbchecksum yes
+dbfilename dump.rdb
+
+# 数据目录（systemd 单元已设置 WorkingDirectory=/var/lib/redis）
+dir /var/lib/redis
+
+################################ 持久化 AOF #################################
+appendonly yes
+appendfilename "appendonly.aof"
+# Redis 7.x 默认 multi-part AOF（appenddirname 目录）
+appenddirname "appendonlydir"
+appendfsync everysec
+no-appendfsync-on-rewrite no
+auto-aof-rewrite-percentage 100
+auto-aof-rewrite-min-size 64mb
+aof-load-truncated yes
+
+################################## 内存 ####################################
+# 强烈建议设置上限，避免 OOM 拖垮整机（按机器内存的 60%~70% 估算）
+maxmemory 4gb
+# 缓存场景推荐 allkeys-lru；有持久化数据时用 noeviction 并监控内存
+maxmemory-policy allkeys-lru
+# 碎片整理（jemalloc 长期运行后有用）
+activedefrag yes
+active-defrag-ignore-bytes 100mb
+active-defrag-threshold-lower 10
+active-defrag-threshold-upper 100
+
+################################## 安全 ####################################
+# 务必设置强密码；ACL 可用时优先使用 ACL 而非单密码
+requirepass ChangeMe_StrongPassword_2026
+# 危险命令重命名或禁用（按业务评估）
+rename-command FLUSHALL ""
+rename-command FLUSHDB ""
+rename-command KEYS ""
+
+################################## 慢查询 ##################################
+slowlog-log-slower-than 10000
+slowlog-max-len 256
+
+############################ 客户端与会话 ##################################
+maxclients 10000
+
+################################## 复制 ####################################
+# 从库示例
+# replicaof 10.0.0.11 6379
+# masterauth ChangeMe_StrongPassword_2026
+replica-read-only yes
+repl-diskless-sync yes
+repl-backlog-size 64mb
+
+################################## 集群 ####################################
+# 集群模式示例
+# cluster-enabled yes
+# cluster-config-file nodes-6379.conf
+# cluster-node-timeout 15000
+
+###################### 后台任务 / IO 线程（性能） ###########################
+# 多核机器可开启 IO 线程（Redis 6.0+ / 鲲鹏 920 等多核 ARM 平台收益明显）
+# 经验值：机器核数的 1/2 ~ 3/4，超过 8 收益递减
+# io-threads 4
+# io-threads-do-reads yes
+
+# 大内存页（需内核支持；ARM/鲲鹏平台可评估开启）
+# 注意：开启前需确认 THP 策略，避免与 activedefrag 冲突
+disable-thp yes
+
+############################## ARM / 麒麟 平台提示 ###########################
+# 1) 若启动时出现 "<jemalloc>: unsupported system page size"，说明二进制里的
+#    jemalloc 未适配 64KB 页。请使用本项目 aarch64 产物（已按 --with-lg-page=16
+#    构建），或用 --malloc libc 重新编译。
+#    确认页大小：getconf PAGESIZE   （4096 或 65536）
+# 2) 鲲鹏 920 支持 crc32/aes/sha2 指令，编译时保持 -O2 即可由编译器自动向量化；
+#    如需显式启用可在编译时追加 CFLAGS="-march=armv8-a+crc"。
+# 3) 麒麟 V10 默认开启 THP 且内核 4.19，建议保持 disable-thp yes，
+#    并配合 activedefrag 使用。
