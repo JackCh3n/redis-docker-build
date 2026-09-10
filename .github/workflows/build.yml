@@ -186,11 +186,13 @@ jobs:
         if: steps.filter.outputs.skip == 'false'
         run: |
           set -e
+          # 注意：dist/<包目录> 是 docker 容器以 root 创建的，runner 用户无法直接写入，
+          # 所以这里必须用 sudo（CNB 侧 stage 本身以 root 运行，无需 sudo）
           for d in dist/*/; do
             [ -d "$d" ] || continue
-            install -m 0755 install.sh "${d}install.sh"
-            install -m 0644 assets/redis.service "${d}redis.service"
-            install -m 0644 assets/redis.conf.example "${d}redis.conf"
+            sudo install -m 0755 install.sh "${d}install.sh"
+            sudo install -m 0644 assets/redis.service "${d}redis.service"
+            sudo install -m 0644 assets/redis.conf.example "${d}redis.conf"
           done
           ls -lh dist/*/
 
