@@ -26,6 +26,9 @@
 # =============================================================================
 
 # ── 构建环境锚点（按架构各一份；runner 只能写在流水线级别） ────────────────
+# 注意：buildArgs 必须是 docker.build 的子节点（写成 docker 的子节点会被静默忽略，
+#       导致异架构仍拉取 Dockerfile 里的默认镜像而报
+#       "no match for platform in manifest"）。
 .build-env-amd64: &build-env-amd64
   runner:
     tags: cnb:arch:amd64
@@ -36,8 +39,8 @@
       by:                      # 缓存 key 文件：依赖变更时重建环境
         - Dockerfile
         - build-redis.sh
-    buildArgs:
-      BASE_IMAGE: centos:7.6.1810
+      buildArgs:
+        BASE_IMAGE: centos:7.6.1810
 
 .build-env-arm64: &build-env-arm64
   runner:
@@ -49,8 +52,8 @@
       by:
         - Dockerfile
         - build-redis.sh
-    buildArgs:
-      BASE_IMAGE: arm64v8/centos:7
+      buildArgs:
+        BASE_IMAGE: arm64v8/centos:7
 
 # 默认 Redis 版本（主线构建用）
 #   7.2.16 = 最后一个 BSD-3-Clause 版本，生产推荐
