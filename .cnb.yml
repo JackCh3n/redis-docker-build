@@ -190,8 +190,17 @@ master:
       stages: *mainline-stages
 
 # ── 稳定版：git tag 推送 ────────────────────────────────────────────────────
+# 注意：主线发布（git:release tag=latest）会创建名为 latest 的 tag，从而再次触发
+#       tag_push 事件。若不在此处拦截，会形成"主线发布 -> tag_push -> 空版本构建失败"
+#       的噪声构建。因此用 if 先过滤，只放行 vRedis-*。
+#       （CNB 的 tag_push 无法在触发配置里按 tag 名匹配，只能在 job 的 if 中判断）
 $:
   tag_push:
     - name: build-stable
       <<: *build-env
+      if: |
+        case "${CNB_BRANCH:-${CI_COMMIT_TAG:-}}" in
+          vRedis-*) exit 0 ;;
+          *) echo ">>> 非版本 tag，跳过稳定版构建: ${CNB_BRANCH:-${CI_COMMIT_TAG:-}}"; exit 1 ;;
+        esac
       stages: *stable-stages

@@ -144,15 +144,13 @@ jobs:
         if: steps.filter.outputs.skip == 'false'
         run: |
           set -e
-          OPTS=""
-          if [ "${{ needs.prepare.outputs.tls }}" = "yes" ] || [ "${{ needs.prepare.outputs.smoke }}" = "yes" ]; then
-            OPTS="--build-arg INSTALL_OPT_DEPS=${{ needs.prepare.outputs.tls == 'yes' && 'yes' || 'no' }}"
-          fi
-          echo ">>> 镜像参数: $OPTS"
+          # 仅当需要 TLS 时才额外安装 openssl-devel
+          OPT_DEPS="${{ needs.prepare.outputs.tls == 'yes' && 'yes' || 'no' }}"
+          echo ">>> INSTALL_OPT_DEPS=${OPT_DEPS}"
           docker buildx build \
             --platform ${{ matrix.platform }} \
             --build-arg BASE_IMAGE=${{ matrix.base_image }} \
-            $OPTS \
+            --build-arg INSTALL_OPT_DEPS="${OPT_DEPS}" \
             -t redis-builder:el7 --load .
 
       - name: 编译 Redis ${{ needs.prepare.outputs.version }}（${{ matrix.arch }}）
