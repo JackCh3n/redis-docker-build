@@ -1,9 +1,12 @@
 # =============================================================================
 # redis-docker-build · GitHub Actions 构建流水线（多架构）
 #
-# 版本语义（主线 vs 稳定版）：
-#   - 主线版本：push 到 main 分支自动构建默认版本（x86_64 + aarch64），
-#     发布到固定 Release 标签 `latest`（每次覆盖更新）
+# 分支与版本语义（本文件位于 7.x 分支）：
+#   仓库按 Redis 主版本拆成两条独立维护的分支线（两条线构建体系差异较大）：
+#     * main 分支 = 8.x 线：Redis 8.10.1（RSALv2/SSPLv1/AGPLv3 三许可），滚动发布 `latest`
+#     * 7.x  分支 = 7.x 线：Redis 7.2.16（BSD-3-Clause），滚动发布 `latest-7.x`
+#   - 主线版本：push 到 7.x 分支自动构建默认版本（x86_64 + aarch64），
+#     发布到固定 Release 标签 `latest-7.x`（每次覆盖更新）
 #   - 稳定版本：打 git tag（vRedis-7.2.16）触发，从 tag 名解析版本，
 #     发布到同名 tag（固化）
 #   - 手动触发：workflow_dispatch 可指定任意版本 / 分配器 / 架构 / TLS
@@ -45,7 +48,7 @@ on:
         required: false
         default: "yes"
   push:
-    branches: [main, master]
+    branches: [7.x]
     tags: ["vRedis-*"]
 
 permissions:
@@ -96,11 +99,11 @@ jobs:
           else
             echo "scene=mainline"              >> "$GITHUB_OUTPUT"
             echo "version=$DEFAULT_VERSION"    >> "$GITHUB_OUTPUT"
-            echo "release_tag=latest"          >> "$GITHUB_OUTPUT"
+            echo "release_tag=latest-7.x"      >> "$GITHUB_OUTPUT"
             echo "malloc=auto"                 >> "$GITHUB_OUTPUT"
             echo "tls=no"                      >> "$GITHUB_OUTPUT"
             echo "smoke=yes"                   >> "$GITHUB_OUTPUT"
-            echo ">>> 场景: 主线构建，版本=$DEFAULT_VERSION"
+            echo ">>> 场景: 主线构建（7.x 线），版本=$DEFAULT_VERSION"
           fi
 
   # ── 构建（矩阵：x86_64 + aarch64） ─────────────────────────────────
@@ -193,6 +196,8 @@ jobs:
             sudo install -m 0755 install.sh "${d}install.sh"
             sudo install -m 0644 assets/redis.service "${d}redis.service"
             sudo install -m 0644 assets/redis.conf.example "${d}redis.conf"
+            # 项目自身许可证（MIT）；上游 Redis 许可证由 build-redis.sh 生成 LICENSE.redis.txt
+            sudo install -m 0644 LICENSE "${d}LICENSE"
           done
           ls -lh dist/*/
 
@@ -254,7 +259,7 @@ jobs:
           fi
 
           case "$SCENE" in
-            mainline) TITLE="Mainline (latest)" ;;
+            mainline) TITLE="Mainline 7.x (latest-7.x)" ;;
             tag)      TITLE="Stable Redis ${VERSION}" ;;
             *)        TITLE="Redis ${VERSION}" ;;
           esac
@@ -274,7 +279,10 @@ jobs:
           - Toolchain: CentOS 7 vault 归档源 + devtoolset-10（GCC 10.2）
           - Each tarball contains BUILD-INFO.txt（含 \`redis-server --version\`、glibc 符号上限、ldd、冒烟测试结果）
 
-          ⚠️ Redis 8.x 起为 RSALv2 / SSPLv1 / AGPLv3 三选一许可；7.2.x 及更早为 BSD-3-Clause。
+          ⚠️ 本产物为 Redis 7.2.x 线（BSD-3-Clause）。Redis 8.x 起为 RSALv2/SSPLv1/AGPLv3
+          三选一许可，见 8.x 分支发布的 Release。
+
+          每个 tar.gz 内含 \`LICENSE\`（本项目 MIT）与 \`LICENSE.redis.txt\`（上游 Redis 许可证原文）。
           EOF
 
           publish() {
@@ -295,7 +303,7 @@ jobs:
           }
 
           if [ "$SCENE" = "mainline" ]; then
-            publish "latest"
+            publish "latest-7.x"
           else
             publish "$RELEASE_TAG"
           fi

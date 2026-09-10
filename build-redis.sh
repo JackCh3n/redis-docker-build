@@ -223,6 +223,32 @@ done
 # 附带一份默认配置文件，便于对照线上 redis.conf
 [ -f "redis.conf" ] && cp -a redis.conf "${OUTDIR}/redis.conf.default"
 
+# ---------- 附带上游许可证（分发必需） ----------
+# Redis 7.2.x 及更早为 BSD-3-Clause，同样要求分发时保留版权与许可声明。
+# Redis 8.x 起为 RSALv2/SSPLv1/AGPLv3 三选一，在任何一种下都不得移除许可声明。
+# 因此这里把源码包内的许可证原文复制为产物目录下的 LICENSE.redis.txt。
+LIC_FILE=""
+for _lic in LICENSE.txt COPYING LICENSE; do
+  if [ -f "$_lic" ]; then
+    cp -a "$_lic" "${OUTDIR}/LICENSE.redis.txt"
+    LIC_FILE="$_lic"
+    break
+  fi
+done
+# 供 BUILD-INFO.txt 使用的许可名称（按版本区间）
+if ver_ge "$REDIS_VERSION" "8.0.0"; then
+  LIC_NAME="RSALv2 / SSPLv1 / AGPLv3 (tri-license, at your option)"
+elif ver_ge "$REDIS_VERSION" "7.4.0"; then
+  LIC_NAME="RSALv2 / SSPLv1 (dual-license, at your option)"
+else
+  LIC_NAME="BSD-3-Clause"
+fi
+if [ -n "$LIC_FILE" ]; then
+  echo ">>> 已附带上游许可证: ${LIC_FILE} -> LICENSE.redis.txt"
+else
+  echo ">>> 警告：源码包内未找到上游许可证文件，产物将缺少许可证原文" >&2
+fi
+
 # ---------- 记录构建信息 ----------
 {
   echo "Redis version    : ${REDIS_VERSION}"
@@ -231,6 +257,8 @@ done
   echo "Allocator        : ${MALLOC}${JEMALLOC_OPTS:+ (JEMALLOC_CONFIGURE_OPTS=\"${JEMALLOC_OPTS}\")}"
   echo "TLS / systemd    : ${TLS} / ${SYSTEMD}"
   echo "Bundled modules  : ${MODULES}"
+  echo "License (upstream): ${LIC_NAME}"
+  echo "License file     : LICENSE.redis.txt"
   echo "Compiler         : ${GCC_VER}"
   echo "Build host page  : ${LIB_PAGE_SIZE}"
   echo "Built at         : $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

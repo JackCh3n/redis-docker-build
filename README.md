@@ -20,6 +20,21 @@
 
 # 中文
 
+## 分支说明（重要）
+
+本项目按 Redis 主版本拆成**两条独立维护的分支线**，因为两者的构建体系差异较大：
+
+| 分支 | Redis 线 | 默认版本 | 许可 | 滚动 Release |
+|---|---|---|---|---|
+| **`main`** | 8.x 线 | 8.10.1 | RSALv2 / SSPLv1 / AGPLv3 | `latest` |
+| **`7.x`**（当前分支） | 7.x 线 | 7.2.16 | BSD-3-Clause | `latest-7.x` |
+
+- 两条线的**稳定版 tag 命名一致**：`vRedis-x.y.z`（例如 `vRedis-7.2.16`、`vRedis-8.10.1`）。
+- 每个分支的 CI 只监听自己的分支（`7.x` 分支听 `7.x`，`main` 分支听 `main`/`master`），互不触发。
+- 为什么拆分支：Redis 8.10 起官方重写了顶层 Makefile，`make` 会连带编译随包的 bundled modules（需要
+  LLVM 21 + Rust 1.94 + CMake 3.25~3.31.6），与 7.x 线「裸跑 make 只编核心」的路径差别很大；
+  拆开后 7.x 线保持极小变动、更稳。
+
 ## 项目简介
 
 生产环境常常需要**脱离发行版自带仓库的 Redis 版本**——CentOS 7 官方仓库的 Redis 停留在 3.x，而信创环境（银河麒麟 V10 SP3 / 鲲鹏 920）往往要求**可控来源、可复现、可审计**的二进制。本项目在 Docker 容器中**复刻生产工具链**，按需构建可直接替换的生产 Redis 二进制。
@@ -65,7 +80,7 @@
 - **⚠️** = 工具链同样满足，但 Redis 官方自 8.x 起已不再测试 CentOS / RHEL 7。社区已验证
   Redis 8.0.0 可在 CentOS 7 + devtoolset 环境下构建成功；8.4 以上版本请先在小范围验证。
   遇到编译报错时，可用 `--build-arg DEVTOOLSET=devtoolset-12`（GCC 12.2）重试。
-- **最新版本**：Redis Open Source **8.10.1**（2026-08-17）；主线默认构建 **7.2.16**（BSD 协议、最稳）。
+- **最新版本**：Redis Open Source **8.10.1**（2026-08-17）；本 **7.x 分支**默认构建 **7.2.16**（BSD 协议、最稳），8.x 线见 `main` 分支。
 - 构建任意版本：手动触发 CI 或本地 `./build.sh build 8.10.1`。
 
 ### Redis 许可说明（重要）
@@ -98,19 +113,20 @@
 ```
 
 > 产物包（`redis-<版本>-<架构>.tar.gz`）是**自包含**的：除二进制外还包含
-> `install.sh` / `redis.service` / `redis.conf`，解压后即可离线一键安装。
+> `install.sh` / `redis.service` / `redis.conf` / `LICENSE`（本项目 MIT）/ `LICENSE.redis.txt`
+> （上游 Redis 许可证原文）/ `BUILD-INFO.txt`，解压后即可离线一键安装。
 
 ## 快速开始
 
 ### 方式一：云端 CI 构建（推荐，无需本地 Docker）
 
-- **GitHub Actions**：推送到 `main` 自动构建 x86_64 + aarch64 并发布到 `latest` Release；
+- **GitHub Actions**：推送到 `7.x` 分支自动构建 x86_64 + aarch64 并发布到 `latest-7.x` Release；
   也可在 Actions 页面 **Run workflow** 手动指定任意版本 / 分配器 / 架构 / TLS。
 
   > ⚠️ 二进制**必须**在本仓库 Dockerfile 内编译——直接在 Ubuntu runner 上编译会链接 glibc 2.35+，无法在 CentOS 7.6（glibc 2.17）上运行。
   > aarch64 使用 GitHub 免费的原生 ARM runner（`ubuntu-24.04-arm`），无需 QEMU；若仓库为 private，请改回 `ubuntu-latest` + `qemu: "true"`。
 
-- **CNB (cnb.cool)**：推送到 `main`/`master` 自动构建 **x86_64 + aarch64 双架构**并发布到 `latest`。
+- **CNB (cnb.cool)**：推送到 `7.x` 分支自动构建 **x86_64 + aarch64 双架构**并发布到 `latest-7.x`。
   两条架构流水线并行执行：x86_64 用 `cnb:arch:amd64` 节点，aarch64 用 CNB **原生 ARM 节点** `cnb:arch:arm64:v8`（非 QEMU）。
 
 ### 方式二：本地 Docker 构建
@@ -237,9 +253,11 @@ make ... CFLAGS="-march=armv8-a+crc -O2"
 
 ## 版本语义：主线 vs 稳定版
 
+> 当前分支为 **`7.x`**，主线 Release 标签是 **`latest-7.x`**；`main` 分支（8.x 线）用 `latest`。
+
 | 触发方式 | 场景 | 构建内容 | Release |
 |---|---|---|---|
-| push 到 `main` / `master` | **主线版本** | 默认版本（x86_64 + aarch64） | `latest`（每次推送覆盖更新） |
+| push 到 `7.x` | **主线版本（7.x 线）** | 默认版本 7.2.16（x86_64 + aarch64） | `latest-7.x`（每次推送覆盖更新） |
 | git tag `vRedis-x.y.z` | **稳定版** | 仅该版本（x86_64 + aarch64） | tag 同名 Release（固化） |
 | GitHub 手动触发 | 任意版本/分配器/架构 | 按输入构建 | `vRedis-{版本}` |
 
@@ -486,13 +504,13 @@ Self-hosted internal use is unaffected by these restrictions. If your policy for
 
 ### Option 1: Cloud CI (recommended)
 
-- **GitHub Actions** — pushes to `main` build x86_64 + aarch64 and publish to the `latest` release. **Run workflow** lets you pick version / allocator / arch / TLS.
+- **GitHub Actions** — pushes to `7.x` build x86_64 + aarch64 and publish to the `latest-7.x` release. **Run workflow** lets you pick version / allocator / arch / TLS.
   > ⚠️ Binaries **must** be built inside this repo's Dockerfile — compiling on a plain Ubuntu runner links glibc 2.35+ and won't run on CentOS 7.6. aarch64 uses the free native `ubuntu-24.04-arm` runner (switch back to `ubuntu-latest` + `qemu: "true"` for private repos).
-- **CNB (cnb.cool)** — pushes to `main`/`master` build **both** x86_64 and aarch64 on native nodes (`cnb:arch:amd64` / `cnb:arch:arm64:v8`) and publish to `latest`.
+- **CNB (cnb.cool)** — pushes to `7.x` build **both** x86_64 and aarch64 on native nodes (`cnb:arch:amd64` / `cnb:arch:arm64:v8`) and publish to `latest-7.x`.
 
 ### Option 2: One-click offline install
 
-Each tarball is self-contained (`install.sh` + `redis.service` + `redis.conf` inside):
+Each tarball is self-contained (`install.sh` + `redis.service` + `redis.conf` + `LICENSE` + `LICENSE.redis.txt` inside):
 
 ```bash
 tar xzf redis-7.2.16-aarch64.tar.gz
@@ -559,9 +577,12 @@ Native builds link the host's own OpenSSL/systemd and are the safest path for TL
 
 ## Release semantics
 
+> This is the **`7.x`** branch: its rolling release tag is **`latest-7.x`**.
+> The `main` branch (8.x line) uses `latest`.
+
 | Trigger | Builds | Release |
 |---|---|---|
-| push to `main` / `master` | default version (both arches) | `latest` (rolling) |
+| push to `7.x` | default version (both arches) | `latest-7.x` (rolling) |
 | tag `vRedis-x.y.z` | that version only | tag-named release (frozen) |
 | manual dispatch | any version/allocator/arch | `vRedis-{version}` |
 

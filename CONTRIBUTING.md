@@ -23,15 +23,40 @@ Thanks for taking the time to contribute! 🎉
    ```
 5. **Commit** with a clear message and open a **Pull Request**.
 
-## Versioning conventions
+## Branching & versioning conventions
 
-- **Mainline** (`main`/`master`): rolling changes, published to the `latest` release automatically.
-- **Stable** (`vRedis-*` tags): frozen releases for production use.
-- When bumping the default Redis version, update **all** of:
+This repo keeps **one branch per Redis major line** (their build systems diverge sharply):
+
+| Branch | Redis line | Default version | License | Rolling release |
+|---|---|---|---|---|
+| `main` | 8.x | `8.10.1` | RSALv2 / SSPLv1 / AGPLv3 | `latest` |
+| `7.x` | 7.x | `7.2.16` | BSD-3-Clause | `latest-7.x` |
+
+- CI triggers are **branch-local**: each branch's `.cnb.yml` / workflow only listens to its own
+  branch (`7.x` listens to `7.x`, `main` listens to `main`/`master`), so the two lines never
+  trigger each other.
+- **Mainline**: rolling changes on the branch, published to that branch's rolling release tag.
+- **Stable** (`vRedis-*` tags): frozen releases for production, identical tag naming on both lines.
+- When bumping the default Redis version on a branch, update **all** of:
   `build.sh`, `.github/workflows/build.yml`, `.cnb.yml`, `README.md`.
-- Default version policy: keep the default on the **last BSD-3-Clause release** (currently `7.2.16`)
-  unless there is a deliberate reason to move — many regulated environments cannot accept
-  RSALv2 / SSPLv1 / AGPLv3 terms.
+- Default version policy on the **`7.x` branch**: stay on the **last BSD-3-Clause release**
+  (`7.2.16`) unless there is a deliberate reason to move — many regulated environments cannot
+  accept RSALv2 / SSPLv1 / AGPLv3 terms. The 8.x line deliberately defaults to `8.10.1`.
+
+## License compliance (must keep)
+
+Upstream Redis licensing changed over time — **7.2.x and earlier = BSD-3-Clause**,
+**7.4–7.8 = RSALv2/SSPLv1**, **8.0+ = RSALv2/SSPLv1/AGPLv3**. All variants forbid removing
+license notices, so **every distributed tarball must carry the upstream license text**:
+
+- `build-redis.sh` copies the in-tree `LICENSE.txt` (8.x) / `COPYING` (7.x) to
+  `LICENSE.redis.txt` inside the package directory.
+- The bundling step (`bundle-installer` in `.cnb.yml`, "装入 install.sh 与 assets" in the
+  GitHub workflow) adds this project's own `LICENSE`.
+- When adding a new build path, keep both files in the tarball. Newer versions may also add a
+  `LICENSE.txt` next to `COPYING`; the copy loop already prefers `LICENSE.txt`.
+
+
 
 ## Architecture notes
 
