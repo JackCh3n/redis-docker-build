@@ -88,13 +88,17 @@
 ├── build-redis.sh                 # 容器内/目标机 参数化构建脚本（核心）
 ├── build.sh                       # 宿主机一键构建入口（本地有 Docker 时）
 ├── build-native.sh                # 目标机原生编译（麒麟/信创，无需 Docker）
+├── install.sh                     # 一键安装/更新脚本（纯离线，随产物包分发）
 ├── .github/workflows/build.yml    # GitHub Actions 流水线（x86_64 + aarch64）
-├── .cnb.yml                       # CNB (cnb.cool) 流水线（x86_64）
+├── .cnb.yml                       # CNB (cnb.cool) 流水线（x86_64 + aarch64 双架构）
 ├── assets/
 │   ├── redis.service              # systemd 单元模板
 │   └── redis.conf.example         # 生产配置参考（含 ARM / 麒麟调优提示）
 └── dist/                          # 构建产物输出目录
 ```
+
+> 产物包（`redis-<版本>-<架构>.tar.gz`）是**自包含**的：除二进制外还包含
+> `install.sh` / `redis.service` / `redis.conf`，解压后即可离线一键安装。
 
 ## 快速开始
 
@@ -104,9 +108,10 @@
   也可在 Actions 页面 **Run workflow** 手动指定任意版本 / 分配器 / 架构 / TLS。
 
   > ⚠️ 二进制**必须**在本仓库 Dockerfile 内编译——直接在 Ubuntu runner 上编译会链接 glibc 2.35+，无法在 CentOS 7.6（glibc 2.17）上运行。
-  > aarch64 默认用 QEMU 模拟构建；若仓库为 public，可将 workflow 中 aarch64 的 `runs-on` 改为 `ubuntu-24.04-arm`，用 GitHub 免费原生 ARM runner 提速数倍。
+  > aarch64 使用 GitHub 免费的原生 ARM runner（`ubuntu-24.04-arm`），无需 QEMU；若仓库为 private，请改回 `ubuntu-latest` + `qemu: "true"`。
 
-- **CNB (cnb.cool)**：推送到 `main`/`master` 自动构建 x86_64 产物并发布到 `latest`。
+- **CNB (cnb.cool)**：推送到 `main`/`master` 自动构建 **x86_64 + aarch64 双架构**并发布到 `latest`。
+  两条架构流水线并行执行：x86_64 用 `cnb:arch:amd64` 节点，aarch64 用 CNB **原生 ARM 节点** `cnb:arch:arm64:v8`（非 QEMU）。
 
 ### 方式二：本地 Docker 构建
 
@@ -246,6 +251,41 @@ git tag vRedis-7.2.16 && git push --tags
 git tag -f vRedis-7.2.16 && git push --force --tags
 ```
 
+## 一键安装 / 更新（推荐）
+
+产物包自带 `install.sh`，**纯离线**（不联网、不依赖 curl/wget，适合内网与信创环境）。
+它会自动识别当前目录的产物包，并与本机已安装版本比对，据此决定安装还是更新：
+
+```bash
+# 1) 解压产物包（在目标机执行）
+tar xzf redis-7.2.16-aarch64.tar.gz
+cd redis-7.2.16-aarch64
+
+# 2) 一键安装 / 更新
+sudo ./install.sh
+
+# 只想看会不会装、装什么版本（不做任何改动）
+./install.sh --check
+```
+
+脚本的版本门禁：
+
+| 情况 | 动作 |
+|---|---|
+| 未安装 Redis | 全新安装 |
+| 包内版本 > 已安装 | **更新**（旧二进制备份到 `/var/backups/redis-<时间戳>/`） |
+| 包内版本 = 已安装 | 提示无需更新（同版本不同构建会额外提示） |
+| 包内版本 < 已安装 | **默认拒绝**降级（需 `--force` 显式放行） |
+
+安装内容：二进制 → `<prefix>/bin`（默认 `/usr/local/bin`）、配置 → `/etc/redis/redis.conf`、
+systemd 单元 → `/etc/systemd/system/redis.service`（自动 `enable`）、运行用户 `redis` 及
+数据/日志目录；最后用临时端口做一次 PING→PONG 冒烟测试。
+
+常用参数：`--pkg <包>`、`--from <路径>`、`--dir <目录>`、`--prefix <目录>`、`--force`、
+`--check`、`--no-systemd`、`--no-config`、`--uninstall`（完整说明见 `./install.sh --help`）。
+
+> 未解压时也可直接安装：`sudo ./install.sh --from redis-7.2.16-aarch64.tar.gz`
+
 ## 升级流程（线上操作参考）
 
 > ⚠️ **与 nginx 不同：Redis 没有 `kill -USR2` 式的二进制热升级**。替换二进制必须重启进程，
@@ -372,7 +412,8 @@ CI 中还会额外校验 tar 包完整性并输出产物清单。
 
 1. Fork 本仓库并创建功能分支。
 2. 修改 shell 脚本后执行 `bash -n <脚本>` 做语法检查。
-3. 保持 GitHub Actions 与 CNB 两条流水线的默认版本一致。
+3. 保持 GitHub Actions 与 CNB 两条流水线的默认版本一致；CNB 为双架构并行流水线，
+   改动 `.cnb.yml` 时注意 `runner` 只能在流水线级别、发布步骤必须保持幂等与并发安全。
 4. 提交 Pull Request，说明改动内容与验证情况（平台 / 架构 / 版本 / 操作步骤）。
 
 ## 开源协议
@@ -446,10 +487,21 @@ Self-hosted internal use is unaffected by these restrictions. If your policy for
 ### Option 1: Cloud CI (recommended)
 
 - **GitHub Actions** — pushes to `main` build x86_64 + aarch64 and publish to the `latest` release. **Run workflow** lets you pick version / allocator / arch / TLS.
-  > ⚠️ Binaries **must** be built inside this repo's Dockerfile — compiling on a plain Ubuntu runner links glibc 2.35+ and won't run on CentOS 7.6. To speed up aarch64, switch its `runs-on` to `ubuntu-24.04-arm` (free native ARM runners for public repos).
-- **CNB (cnb.cool)** — pushes to `main`/`master` build x86_64 and publish to `latest`.
+  > ⚠️ Binaries **must** be built inside this repo's Dockerfile — compiling on a plain Ubuntu runner links glibc 2.35+ and won't run on CentOS 7.6. aarch64 uses the free native `ubuntu-24.04-arm` runner (switch back to `ubuntu-latest` + `qemu: "true"` for private repos).
+- **CNB (cnb.cool)** — pushes to `main`/`master` build **both** x86_64 and aarch64 on native nodes (`cnb:arch:amd64` / `cnb:arch:arm64:v8`) and publish to `latest`.
 
-### Option 2: Local Docker build
+### Option 2: One-click offline install
+
+Each tarball is self-contained (`install.sh` + `redis.service` + `redis.conf` inside):
+
+```bash
+tar xzf redis-7.2.16-aarch64.tar.gz
+cd redis-7.2.16-aarch64
+sudo ./install.sh          # install, or in-place update (auto version compare)
+./install.sh --check       # dry run: show what would happen
+```
+
+### Option 3: Local Docker build
 
 ```bash
 ./build.sh image                 # build builder image for host arch
@@ -467,7 +519,7 @@ docker run --rm -v "$PWD/dist:/opt/dist" redis-builder:el7 \
   --redis-version 7.2.16 --malloc auto --smoke yes --output /opt/dist
 ```
 
-### Option 3: Native build on the target host (Kylin / offline)
+### Option 4: Native build on the target host (Kylin / offline)
 
 ```bash
 ./build-native.sh                    # auto-detects OS / glibc / gcc / page size

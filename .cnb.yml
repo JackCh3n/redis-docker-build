@@ -1,21 +1,35 @@
 # =============================================================================
-# redis-docker-build · CNB (cnb.cool) 云原生构建流水线
+# redis-docker-build · CNB (cnb.cool) 云原生构建流水线（x86_64 + aarch64 双架构）
 #
-# 说明：CNB 构建节点为 x86_64，本流水线只构建 **x86_64** 产物（CentOS 7.6 兼容）。
-#       aarch64（银河麒麟 V10 SP3 / 鲲鹏）产物请使用 GitHub Actions 流水线，
-#       或在 aarch64 机器上直接执行 ./build-native.sh。
+# 架构策略
+# ---------
+#   x86_64  -> runner.tags: cnb:arch:amd64       节点，基础镜像 centos:7.6.1810
+#   aarch64 -> runner.tags: cnb:arch:arm64:v8   节点（CNB 原生 ARM，非 QEMU），
+#                                                基础镜像 arm64v8/centos:7
 #
-# 版本语义（与 GitHub Actions 一致）：
-#   - 主线版本：main / master 分支 push 自动构建默认版本，发布到固定 Release `latest`
-#   - 稳定版本：打 git tag（vRedis-7.2.16）触发 tag_push，从 tag 名解析版本，
-#     只构建该版本，发布到同名 tag（固化）
+#   同一次 push / tag 会触发「两条并行流水线」，各自编译本架构产物。
+#   注意：runner 只能在流水线级别配置（Stage 级别不支持），所以同一套 stages
+#   通过 YAML 锚点被两条流水线复用——stages 内容是架构无关的。
 #
-# 结构说明：CNB 的 tag_push 是顶级事件（与 main:/master: 平级）；
-#           构建容器由本仓库 Dockerfile 构建。
+# 发布策略
+# ---------
+#   两条流水线各自把「本架构」的 tar.gz 上传到**同一个** Release。
+#   因此 ensure-release 必须满足：
+#     1) 幂等：已存在则更新标题/描述，不重复创建
+#     2) 并发安全：两条流水线可能同时创建，409/422 视为已存在
+#   上传阶段只 glob 本流水线 workspace 下的 dist/*.tar.gz，天然互不覆盖。
+#
+# 版本语义（与 GitHub Actions 一致）
+# ---------
+#   - 主线：main / master push    -> 固定 Release `latest`（滚动更新）
+#   - 稳定：git tag vRedis-x.y.z  -> 同名 tag Release（固化）
 # =============================================================================
 
-# ── 公共构建环境（YAML 锚点复用） ──────────────────────────────────────────
-.build-env: &build-env
+# ── 构建环境锚点（按架构各一份；runner 只能写在流水线级别） ────────────────
+.build-env-amd64: &build-env-amd64
+  runner:
+    tags: cnb:arch:amd64
+    cpus: 8
   docker:
     build:
       dockerfile: Dockerfile   # CentOS 7.6.1810 + devtoolset-10 编译环境
@@ -25,22 +39,77 @@
     buildArgs:
       BASE_IMAGE: centos:7.6.1810
 
+.build-env-arm64: &build-env-arm64
+  runner:
+    tags: cnb:arch:arm64:v8
+    cpus: 8
+  docker:
+    build:
+      dockerfile: Dockerfile
+      by:
+        - Dockerfile
+        - build-redis.sh
+    buildArgs:
+      BASE_IMAGE: arm64v8/centos:7
+
 # 默认 Redis 版本（主线构建用）
 #   7.2.16 = 最后一个 BSD-3-Clause 版本，生产推荐
 #   8.10.1 = 当前最新版（RSALv2/SSPLv1/AGPLv3 三许可），可用 tag 手动发布
 .vars: &vars
   REDIS_VERSION: "7.2.16"
 
-# ── 主线 stages（main/master 共用） ─────────────────────────────────────────
-.mainline-stages: &mainline-stages
+# 稳定版只认 vRedis-* 标签；其余 tag（例如历史遗留的 latest）直接跳过
+.is-version-tag: &is-version-tag |
+  case "${CNB_BRANCH:-${CI_COMMIT_TAG:-}}" in
+    vRedis-*) exit 0 ;;
+    *) echo ">>> 非版本 tag，跳过: ${CNB_BRANCH:-${CI_COMMIT_TAG:-}}"; exit 1 ;;
+  esac
+
+# ── 统一阶段（两架构 + 主线/稳定版 共用） ──────────────────────────────────
+# 场景判定放在第一个 stage，通过 exports 把结果注入后续 stage 的环境变量。
+.stages: &stages
+  # 判定本次是「主线」还是「稳定版」，并解析版本号
+  - name: resolve-scene
+    script: |
+      set -e
+      REF="${CNB_BRANCH:-${CI_COMMIT_TAG:-}}"
+      case "$REF" in
+        vRedis-*)
+          V="${REF#vRedis-}"
+          TAG="$REF"
+          TITLE="Stable Redis ${V}"
+          MK="false"
+          echo ">>> 场景: 稳定版构建（tag=${REF}，版本=${V}）"
+          ;;
+        *)
+          V="${REDIS_VERSION:-7.2.16}"
+          TAG="latest"
+          TITLE="Mainline (latest)"
+          MK="true"
+          echo ">>> 场景: 主线构建（ref=${REF}，版本=${V}）"
+          ;;
+      esac
+      echo "##[set-output TAG=${TAG}]"
+      echo "##[set-output TITLE=${TITLE}]"
+      echo "##[set-output VERSION=${V}]"
+      echo "##[set-output MK=${MK}]"
+    exports:
+      TAG: RELEASE_TAG
+      TITLE: RELEASE_TITLE
+      VERSION: RELEASE_VERSION
+      MK: RELEASE_MAKE_LATEST
+
+  # 编译（架构由流水线的 BASE_IMAGE 决定）
   - name: build-redis
     script: |
       set -e
+      echo ">>> 本流水线架构: $(uname -m)"
       bash /usr/local/bin/build-redis.sh \
-        --redis-version "${REDIS_VERSION:-7.2.16}" \
+        --redis-version "${RELEASE_VERSION}" \
         --malloc auto \
         --smoke yes \
         --output "$PWD/dist"
+
   - name: list-and-check
     script: |
       set -e
@@ -49,158 +118,147 @@
         echo "===== $d ====="
         cat "${d}BUILD-INFO.txt" 2>/dev/null | head -n 30 || true
       done
-  - name: package
+
+  # 让压缩包「自包含」：把 install.sh 与 assets/ 一并放进产物目录
+  - name: bundle-installer
     script: |
       set -e
-      cd dist
-      for d in */; do tar czf "${d%/}.tar.gz" "${d%/}"; done
-      ls -lh *.tar.gz
-  - name: gen-notes
-    script: |
-      # 生成到工作区相对路径 RELEASE_NOTES.md，git:release 插件在工作区读取
-      cat > RELEASE_NOTES.md <<EOF
-      ## Mainline (latest)
-
-      Auto-built on every push. Rolling update.
-
-      | Type | Version | File |
-      |------|---------|------|
-      | Redis (x86_64) | ${REDIS_VERSION:-7.2.16} | redis-${REDIS_VERSION:-7.2.16}-x86_64.tar.gz |
-
-      Build env: Docker CentOS 7.6.1810 (glibc 2.17) + devtoolset-10 (GCC 10.2)
-      Runs on: CentOS 7.6 / 7.9 and later x86_64
-      License: Redis 7.2.x = BSD-3-Clause
-      EOF
-  - name: create-release
-    type: git:release
-    options:
-      tag: latest
-      title: Mainline (latest)
-      descriptionFromFile: RELEASE_NOTES.md
-      latest: true
-    exports:
-      version: latest
-  - name: upload-attachments
-    image: cnbcool/attachments:latest
-    settings:
-      tag: latest
-      attachments:
-        - "./dist/*.tar.gz"
-
-# ── 稳定版 stages（tag_push 共用） ──────────────────────────────────────────
-.stable-stages: &stable-stages
-  - name: resolve-tag
-    script: |
-      set -e
-      TAG="${CNB_BRANCH:-${CI_COMMIT_TAG:-}}"
-      echo ">>> 触发 tag: ${TAG}"
-      case "$TAG" in
-        vRedis-*)
-          echo "##[set-output TAG=${TAG}]"
-          echo "##[set-output VERSION=${TAG#vRedis-}]"
-          ;;
-        *)
-          echo ">>> 忽略非版本 tag: ${TAG}"
-          exit 0
-          ;;
-      esac
-    exports:
-      TAG: TAG_NAME
-      VERSION: BUILD_VERSION
-  - name: build-stable-binary
-    script: |
-      set -e
-      echo ">>> 构建 Redis 版本: ${BUILD_VERSION}"
-      bash /usr/local/bin/build-redis.sh \
-        --redis-version "${BUILD_VERSION}" \
-        --malloc auto \
-        --smoke yes \
-        --output "$PWD/dist"
-  - name: list-and-check
-    script: |
-      set -e
-      ls -lhR dist/
       for d in dist/*/; do
-        echo "===== $d ====="
-        cat "${d}BUILD-INFO.txt" 2>/dev/null | head -n 30 || true
+        [ -d "$d" ] || continue
+        install -m 0755 install.sh "${d}install.sh"
+        install -m 0644 assets/redis.service "${d}redis.service"
+        install -m 0644 assets/redis.conf.example "${d}redis.conf"
       done
+      ls -lh dist/*/
+
   - name: package
     script: |
       set -e
       cd dist
       for d in */; do tar czf "${d%/}.tar.gz" "${d%/}"; done
       ls -lh *.tar.gz
+
+  # 生成 Release 说明（两条架构流水线内容一致，谁后写都不影响结果）
   - name: gen-notes
     script: |
-      # 注意：不用 heredoc（YAML 缩进会导致 EOF 结束符不在行首，bash 报 syntax error），改用 printf
-      printf '## Stable Redis %s\n\nTriggered by git tag %s. Fixed version.\n\n- Asset: redis-%s-x86_64.tar.gz\n- Arch: x86_64 (CentOS 7.6 / 7.9 compatible, glibc 2.17)\n- Build env: Docker CentOS 7.6.1810 + devtoolset-10 (GCC 10.2)\n' \
-        "${BUILD_VERSION}" "${TAG_NAME}" "${BUILD_VERSION}" > RELEASE_NOTES.md
-  - name: create-release
+      set -e
+      printf '## %s\n\nRedis Open Source %s, built in a Docker-simulated CentOS 7 (glibc 2.17) environment.\n\n| Arch | Asset | Runs on |\n|------|-------|---------|\n| x86_64 | `redis-%s-x86_64.tar.gz` | CentOS 7.6 / 7.9 and later |\n| aarch64 | `redis-%s-aarch64.tar.gz` | aarch64 with glibc >= 2.17 (incl. Kylin V10 SP3) |\n\nEach tarball is self-contained: extract it and run `sudo ./install.sh` (offline install / in-place update).\n\n- Toolchain: CentOS 7 vault archive + devtoolset-10 (GCC 10.2)\n- Allocator: jemalloc (aarch64 uses `--with-lg-page=16` for 4K/64K pages)\n\n> Redis 8.x is RSALv2/SSPLv1/AGPLv3; 7.2.x and earlier is BSD-3-Clause.\n' \
+        "${RELEASE_TITLE}" "${RELEASE_VERSION}" "${RELEASE_VERSION}" "${RELEASE_VERSION}" > RELEASE_NOTES.md
+      cat RELEASE_NOTES.md
+
+  # 幂等 + 并发安全地确保 Release 存在
+  - name: ensure-release
     script: |
       set -e
-      echo ">>> 幂等创建 Release: ${TAG_NAME}"
-      # 重要：CNB API 的 GET/POST 都必须带 Accept: application/vnd.cnb.api+json 头，
-      # 只带 Content-Type 会返回 406
-      EXIST=$(curl -s -m 30 \
-        -H "Authorization: Bearer ${CNB_TOKEN}" \
-        -H "Accept: application/vnd.cnb.api+json" \
-        "https://api.cnb.cool/${CNB_REPO_SLUG}/-/releases" \
-        | grep -c "\"tag_name\":\"${TAG_NAME}\"" || true)
-      if [ "${EXIST}" != "0" ]; then
-        echo ">>> Release ${TAG_NAME} 已存在，跳过创建（附件由 upload 阶段更新）"
-      else
-        BODY=$(sed ':a;N;$!ba;s/"/\\"/g;s/\n/\\n/g' RELEASE_NOTES.md)
-        HTTP=$(curl -s -o /tmp/rel.json -w "%{http_code}" -m 30 \
-          -X POST \
-          -H "Authorization: Bearer ${CNB_TOKEN}" \
-          -H "Content-Type: application/json" \
-          -H "Accept: application/vnd.cnb.api+json" \
-          "https://api.cnb.cool/${CNB_REPO_SLUG}/-/releases" \
-          -d "{\"tag_name\":\"${TAG_NAME}\",\"name\":\"Stable ${TAG_NAME}\",\"body\":\"${BODY}\",\"draft\":false,\"prerelease\":false}")
-        echo ">>> 创建 Release 结果: HTTP ${HTTP}"
-        cat /tmp/rel.json 2>/dev/null | head -c 300 || true
-        echo
-        if [ "$HTTP" != "200" ] && [ "$HTTP" != "201" ]; then
-          echo "!!! Release 创建失败（HTTP ${HTTP}）"
-          exit 1
+      TAG="${RELEASE_TAG:?缺少 RELEASE_TAG}"
+      NAME="${RELEASE_TITLE:-$TAG}"
+      MK="${RELEASE_MAKE_LATEST:-false}"
+      API="https://api.cnb.cool/${CNB_REPO_SLUG}/-/releases"
+      H_AUTH="Authorization: Bearer ${CNB_TOKEN}"
+      H_ACC="Accept: application/vnd.cnb.api+json"
+
+      # 从 releases 列表中提取指定 tag 的 release id
+      # 注意：CNB API 的 GET/POST/PATCH 都必须带 Accept: application/vnd.cnb.api+json，
+      #       只带 Content-Type 会返回 406
+      rel_id() {
+        curl -s -m 30 -H "$H_AUTH" -H "$H_ACC" "${API}" \
+          | tr -d ' \t\n' \
+          | grep -oE "\"id\":\"[0-9]+\",\"tag_name\":\"$1\"" \
+          | head -n 1 | grep -oE '[0-9]+' || true
+      }
+
+      BODY=$(sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\n/\\n/g' RELEASE_NOTES.md)
+
+      echo ">>> 确保 Release 存在: ${TAG}（make_latest=${MK}）"
+      OK="no"
+      for attempt in 1 2 3 4 5; do
+        ID="$(rel_id "$TAG")"
+        if [ -n "$ID" ]; then
+          echo ">>> 已存在（id=${ID}），更新标题与描述"
+          HTTP=$(curl -s -o /dev/null -w "%{http_code}" -m 30 -X PATCH \
+            -H "$H_AUTH" -H "Content-Type: application/json" -H "$H_ACC" \
+            "${API}/${ID}" \
+            -d "{\"name\":\"${NAME}\",\"body\":\"${BODY}\",\"make_latest\":\"${MK}\"}") || HTTP="000"
+          echo ">>> PATCH 结果: HTTP ${HTTP}"
+          if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ]; then
+            OK="yes"
+          else
+            echo ">>> 警告：描述更新失败，但附件仍可上传，继续"
+            OK="yes"
+          fi
+          break
         fi
+
+        echo ">>> 不存在，创建（第 ${attempt} 次尝试）"
+        HTTP=$(curl -s -o /tmp/rel.json -w "%{http_code}" -m 30 -X POST \
+          -H "$H_AUTH" -H "Content-Type: application/json" -H "$H_ACC" \
+          "${API}" \
+          -d "{\"tag_name\":\"${TAG}\",\"name\":\"${NAME}\",\"body\":\"${BODY}\",\"draft\":false,\"prerelease\":false,\"make_latest\":\"${MK}\",\"target_commitish\":\"${CNB_COMMIT:-main}\"}") || HTTP="000"
+        echo ">>> POST 结果: HTTP ${HTTP}"
+        case "$HTTP" in
+          200|201) OK="yes"; break ;;
+          409|422)
+            # 另一条架构流水线抢先创建了，视为成功
+            echo ">>> 并发创建冲突，视为已存在"
+            OK="yes"; break ;;
+        esac
+        head -c 300 /tmp/rel.json 2>/dev/null || true
+        echo
+        echo ">>> 第 ${attempt} 次失败，3s 后重试"
+        sleep 3
+      done
+      if [ "$OK" != "yes" ]; then
+        echo "!!! Release 创建失败（tag=${TAG}）"
+        exit 1
       fi
+      echo ">>> Release ${TAG} 就绪"
+
+  # 上传本架构产物（glob 只匹配本 workspace 的 dist，两架构互不覆盖）
   - name: upload-attachments
     image: cnbcool/attachments:latest
     settings:
-      tag: $TAG_NAME
+      tag: ${RELEASE_TAG}
       attachments:
         - "./dist/*.tar.gz"
 
-# ── 主线：main / master 分支 push ───────────────────────────────────────────
+# ── 主线：main / master 分支 push（两条流水线并行） ─────────────────────────
 main:
   push:
-    - name: build-mainline
-      <<: *build-env
+    - name: mainline-amd64
+      <<: *build-env-amd64
       env:
         <<: *vars
-      stages: *mainline-stages
+      stages: *stages
+    - name: mainline-arm64
+      <<: *build-env-arm64
+      env:
+        <<: *vars
+      stages: *stages
 
 master:
   push:
-    - name: build-mainline
-      <<: *build-env
+    - name: mainline-amd64
+      <<: *build-env-amd64
       env:
         <<: *vars
-      stages: *mainline-stages
+      stages: *stages
+    - name: mainline-arm64
+      <<: *build-env-arm64
+      env:
+        <<: *vars
+      stages: *stages
 
-# ── 稳定版：git tag 推送 ────────────────────────────────────────────────────
-# 注意：主线发布（git:release tag=latest）会创建名为 latest 的 tag，从而再次触发
-#       tag_push 事件。若不在此处拦截，会形成"主线发布 -> tag_push -> 空版本构建失败"
-#       的噪声构建。因此用 if 先过滤，只放行 vRedis-*。
-#       （CNB 的 tag_push 无法在触发配置里按 tag 名匹配，只能在 job 的 if 中判断）
+# ── 稳定版：git tag 推送（两条流水线并行） ─────────────────────────────────
+# 说明：主线发布走 CNB Release API（make_latest=true），不再创建名为 latest 的
+#       git tag，因此不会再产生「latest tag 触发 tag_push」的噪声构建；
+#       这里仍保留 if 过滤，只放行 vRedis-*。
 $:
   tag_push:
-    - name: build-stable
-      <<: *build-env
-      if: |
-        case "${CNB_BRANCH:-${CI_COMMIT_TAG:-}}" in
-          vRedis-*) exit 0 ;;
-          *) echo ">>> 非版本 tag，跳过稳定版构建: ${CNB_BRANCH:-${CI_COMMIT_TAG:-}}"; exit 1 ;;
-        esac
-      stages: *stable-stages
+    - name: stable-amd64
+      <<: *build-env-amd64
+      if: *is-version-tag
+      stages: *stages
+    - name: stable-arm64
+      <<: *build-env-arm64
+      if: *is-version-tag
+      stages: *stages

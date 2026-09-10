@@ -14,6 +14,7 @@ Thanks for taking the time to contribute! 🎉
    bash -n build-redis.sh
    bash -n build.sh
    bash -n build-native.sh
+   bash -n install.sh
    ```
 4. **Test the build locally** if you have Docker:
    ```bash
@@ -49,10 +50,39 @@ Thanks for taking the time to contribute! 🎉
   The redirect is intermittent, which makes this a hard-to-reproduce failure. Keep
   `DEVTOOLSET_MIRROR` (CDN) + `DEVTOOLSET_MIRROR_FALLBACK` and the retry loop intact.
 
+## Installer (`install.sh`) notes
+
+- The installer is **strictly offline**: no network calls, no `curl`/`wget` dependency. It works on
+  whatever package / tarball is already on disk. Do not add download logic.
+- Keep it **bash 4.2** compatible (CentOS 7) — no `mapfile`, no `${var,,}`, no associative arrays.
+- Version gating order (must stay this way):
+  not installed → install; pkg > installed → update; pkg == installed → skip (call out a differing
+  build hash); pkg < installed → **refuse** unless `--force`.
+- Preserve **symlinks** when installing — `redis-check-aof` / `redis-check-rdb` / `redis-sentinel`
+  are symlinks to `redis-server`; dereferencing them bloats the install ~5×.
+- Back up the old binaries (`/var/backups/redis-<timestamp>/`) before overwriting, and never
+  overwrite an existing `/etc/redis/redis.conf`.
+- Detect the package by **content** (`redis-server` + `BUILD-INFO.txt`), not by the presence of the
+  exec bit — some filesystems lose it, and `install -m 0755` fixes it anyway.
+
 ## CI notes
 
 - GitHub Actions and CNB pipelines must stay in sync for the **default version** — change both
-  together. CNB builds x86_64 only; aarch64 is produced by GitHub Actions (or `build-native.sh`).
+  together. Both now produce **x86_64 + aarch64**.
+- **CNB is a two-pipeline setup.** `runner` (tags/cpus) can only be set at the
+  **pipeline** level, so `.cnb.yml` defines two parallel pipelines per trigger
+  (`cnb:arch:amd64` + `cnb:arch:arm64:v8`) that **share one stage list** via a YAML anchor.
+  aarch64 uses CNB's native ARM nodes — no QEMU.
+- **Publishing must stay idempotent and race-safe.** Both arch pipelines publish into the *same*
+  release, so `ensure-release` does GET-then-create, tolerates `409/422` (the other pipeline won
+  the race) and PATCHes an existing release instead of recreating it. Upload only globs the
+  local `dist/`, so the two arches never overwrite each other.
+- CNB API calls need `Accept: application/vnd.cnb.api+json` on GET/POST/PATCH (Content-Type alone
+  returns 406). Do not introduce raw `\n` inside a JSON body — escape it (see `ensure-release`).
+- The GitHub release job requires `contents: write`; CNB needs `CNB_TOKEN` (already in the env).
+- The tarballs must stay **self-contained**: the packaging step copies `install.sh`,
+  `assets/redis.service` and `assets/redis.conf.example` into each `dist/<pkg>/` before `tar`.
+  If you add a new asset file, add it to all three packagers (`.cnb.yml`, `build.yml`, `build.sh`).
 - Release titles must be **English**; notes use `--notes-file` (a plain `\n` passed to `--notes`
   is treated literally).
 - The in-container smoke test (start instance → `PING` → expect `PONG`) must pass; a failing

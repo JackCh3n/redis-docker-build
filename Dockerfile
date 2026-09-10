@@ -89,13 +89,13 @@ RUN set -eux; \
 
 # ---------- 3) 安装 Redis 编译依赖 ----------
 # 必需：gcc/make/binutils（上面 devtoolset 提供）、wget、tar、perl（部分脚本用）、
-#       diffutils/which、ca-certificates。
+#       diffutils/which、ca-certificates、curl（CI 里调用 CNB Release API 需要）。
 # 可选：openssl-devel（--tls yes 时需要）、systemd-devel（--systemd yes 时需要），
 #       二者默认不在镜像内，构建时按需传入 INSTALL_OPT_DEPS=yes。
 ARG INSTALL_OPT_DEPS=no
 RUN set -eux; \
     yum -y install \
-        wget tar gzip xz which perl diffutils findutils ca-certificates; \
+        wget curl tar gzip xz which perl diffutils findutils ca-certificates; \
     if [ "${INSTALL_OPT_DEPS}" = "yes" ]; then \
       yum -y install openssl-devel systemd-devel; \
     fi; \

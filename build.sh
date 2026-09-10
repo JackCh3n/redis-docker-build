@@ -88,17 +88,35 @@ build_binary() {
     --redis-version "$ver" --malloc "$malloc" --output /opt/dist --smoke yes
 }
 
+# 把 install.sh 与 assets/ 装入产物目录，使 tar.gz 自包含、可离线一键安装
+bundle_and_package() {
+  local d
+  echo ">>> 装入 install.sh 与 assets（使产物包自包含）"
+  for d in "$DIST_DIR"/*/; do
+    [ -d "$d" ] || continue
+    cp -f "${SCRIPT_DIR}/install.sh"               "${d}install.sh"
+    chmod 0755 "${d}install.sh"
+    cp -f "${SCRIPT_DIR}/assets/redis.service"     "${d}redis.service"
+    cp -f "${SCRIPT_DIR}/assets/redis.conf.example" "${d}redis.conf"
+  done
+  echo ">>> 打包 tar.gz"
+  ( cd "$DIST_DIR" && for d in */; do tar czf "${d%/}.tar.gz" "${d%/}"; done )
+  ls -lh "$DIST_DIR"/*.tar.gz 2>/dev/null || true
+}
+
 case "${1:-image}" in
   image)
     build_image "${2:-$HOST_ARCH}"
     ;;
   build)
     build_binary "${2:-$DEFAULT_VERSION}" "${3:-$HOST_ARCH}" "${4:-auto}"
+    bundle_and_package
     ;;
   all)
     VER="${2:-$DEFAULT_VERSION}"
     build_binary "$VER" x86_64 auto
     build_binary "$VER" aarch64 auto
+    bundle_and_package
     ;;
   native)
     VER="${2:-$DEFAULT_VERSION}"
@@ -106,6 +124,7 @@ case "${1:-image}" in
     echo ">>> 当前主机原生编译 Redis ${VER}（malloc=${MALLOC_ARG}）"
     bash "${SCRIPT_DIR}/build-redis.sh" \
       --redis-version "$VER" --malloc "$MALLOC_ARG" --output "$DIST_DIR" --smoke yes
+    bundle_and_package
     ;;
   *)
     echo "用法: $0 {image|build|all|native} [版本] [x86_64|aarch64] [auto|jemalloc|libc]" >&2

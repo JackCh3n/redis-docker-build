@@ -10,11 +10,14 @@
 #
 # 架构说明：
 #   x86_64  -> ubuntu-latest 原生构建，基础镜像 centos:7.6.1810（glibc 2.17）
-#   aarch64 -> ubuntu-latest + QEMU 模拟构建，基础镜像 arm64v8/centos:7（glibc 2.17）
+#   aarch64 -> ubuntu-24.04-arm 原生 ARM runner，基础镜像 arm64v8/centos:7（glibc 2.17）
 #              产物可在 glibc >= 2.17 的 aarch64 系统运行，含银河麒麟 V10 SP3
 #
-#   加速提示：若仓库为 public，可把 aarch64 的 runner 直接改成
-#   `ubuntu-24.04-arm`（GitHub 免费原生 ARM runner），无需 QEMU，构建快数倍。
+#   注意：`ubuntu-24.04-arm` 目前仅对 public 仓库免费；若仓库为 private，
+#   请把 aarch64 的 runner 改回 `ubuntu-latest` 并把 qemu 置为 "true"。
+#
+# 产物形态：tar.gz 内除二进制外还包含 install.sh / redis.service / redis.conf，
+#          即「自包含、可离线一键安装」。
 # =============================================================================
 name: build-redis
 
@@ -178,6 +181,18 @@ jobs:
             echo "===== $d ====="
             cat "${d}BUILD-INFO.txt" 2>/dev/null | head -n 40 || true
           done
+
+      - name: 装入 install.sh 与 assets（使产物包自包含）
+        if: steps.filter.outputs.skip == 'false'
+        run: |
+          set -e
+          for d in dist/*/; do
+            [ -d "$d" ] || continue
+            install -m 0755 install.sh "${d}install.sh"
+            install -m 0644 assets/redis.service "${d}redis.service"
+            install -m 0644 assets/redis.conf.example "${d}redis.conf"
+          done
+          ls -lh dist/*/
 
       - name: 打包
         if: steps.filter.outputs.skip == 'false'
