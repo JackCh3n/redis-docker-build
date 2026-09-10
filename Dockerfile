@@ -31,11 +31,17 @@ FROM ${BASE_IMAGE}
 #                    x86_64  -> 7.6.1810            （与 centos:7.6.1810 基础镜像一致）
 #                    aarch64 -> altarch/7           （与 arm64v8/centos:7 基础镜像一致）
 # DEVTOOLSET       : 软件集合名，devtoolset-9/10/12 在 x86_64 与 aarch64 上均有提供
-# DEVTOOLSET_MIRROR: devtoolset 的 RPM 归档源（CentOS buildlogs）
+# DEVTOOLSET_MIRROR: devtoolset 的 RPM 归档源。
+#                    必须使用 CDN 域名 buildlogs.cdn.centos.org：
+#                    主域名 buildlogs.centos.org 会对 RPM 返回 302 跳转到 CDN，
+#                    而 CentOS 7 自带的 yum 不会跟随 302，会报
+#                    "HTTP Error 302 - Found / No more mirrors to try" 导致构建失败。
+# DEVTOOLSET_MIRROR_FALLBACK: 备用源，主源整体不可用时自动回退（留空则跳过）。
 ARG OS_MIRROR=https://mirrors.aliyun.com/centos-vault
 ARG VAULT_PREFIX=
 ARG DEVTOOLSET=devtoolset-10
-ARG DEVTOOLSET_MIRROR=https://buildlogs.centos.org
+ARG DEVTOOLSET_MIRROR=https://buildlogs.cdn.centos.org
+ARG DEVTOOLSET_MIRROR_FALLBACK=https://buildlogs.centos.org
 
 ENV DEVTOOLSET_ROOT=/opt/rh/${DEVTOOLSET}/root
 
@@ -59,16 +65,25 @@ RUN set -eux; \
 # ---------- 2) 安装 devtoolset（GCC 10） ----------
 # buildlogs 目录本身就是可用的 yum 仓库（含 repodata）。
 # devtoolset 的 RPM 未经签名发布，故 --nogpgcheck。
+# 依次尝试「主源 -> 备用源」，任一源安装成功即通过；全部失败才报错。
 RUN set -eux; \
     ARCH="$(uname -m)"; \
-    printf '[devtoolset]\nname=devtoolset - %s\nbaseurl=%s/c7-%s.%s/\ngpgcheck=0\nenabled=1\n\n' \
-      "${DEVTOOLSET}" "${DEVTOOLSET_MIRROR}" "${DEVTOOLSET}" "${ARCH}" > /etc/yum.repos.d/devtoolset.repo; \
-    yum -y install --nogpgcheck \
-        scl-utils \
-        "${DEVTOOLSET}-gcc" \
-        "${DEVTOOLSET}-gcc-c++" \
-        "${DEVTOOLSET}-make" \
-        "${DEVTOOLSET}-binutils"; \
+    ok=no; \
+    for base in "${DEVTOOLSET_MIRROR}" "${DEVTOOLSET_MIRROR_FALLBACK}"; do \
+      [ -n "$base" ] || continue; \
+      echo ">>> 尝试 devtoolset 源: ${base}/c7-${DEVTOOLSET}.${ARCH}/"; \
+      printf '[devtoolset]\nname=devtoolset - %s\nbaseurl=%s/c7-%s.%s/\ngpgcheck=0\nenabled=1\n\n' \
+        "${DEVTOOLSET}" "$base" "${DEVTOOLSET}" "${ARCH}" > /etc/yum.repos.d/devtoolset.repo; \
+      yum clean all >/dev/null 2>&1 || true; \
+      if yum -y install --nogpgcheck \
+            scl-utils \
+            "${DEVTOOLSET}-gcc" \
+            "${DEVTOOLSET}-gcc-c++" \
+            "${DEVTOOLSET}-make" \
+            "${DEVTOOLSET}-binutils"; then ok=yes; break; fi; \
+      echo ">>> 源 ${base} 不可用，尝试下一个"; \
+    done; \
+    [ "$ok" = "yes" ] || { echo "!! devtoolset 安装失败：所有源均不可用"; exit 1; }; \
     yum clean all; \
     "${DEVTOOLSET_ROOT}/usr/bin/gcc" --version | head -1
 
