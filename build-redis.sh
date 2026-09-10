@@ -255,30 +255,58 @@ if [ "$SMOKE" = "yes" ]; then
   PORT="${SMOKE_PORT:-16399}"
   TMPDIR_S="$(mktemp -d)"
   smoke_ok=no
-  # --save '' 关闭 RDB 落盘，避免污染工作目录
-  if "${OUTDIR}/redis-server" --port "$PORT" --save '' --appendonly no \
-       --daemonize yes --pidfile "${TMPDIR_S}/redis.pid" \
-       --logfile "${TMPDIR_S}/redis.log" --dir "$TMPDIR_S" 2>"${TMPDIR_S}/start.err"; then
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
+  smoke_note=""
+
+  # 说明：aarch64 上若构建机内核 THP 为 always，Redis 会因 ARM64 写时复制缺陷检查
+  #       而「主动退出」（日志含 ARM64-COW-BUG）。这是构建机内核设置，不是产物缺陷，
+  #       因此冒烟测试显式加上 --ignore-warnings ARM64-COW-BUG；
+  #       若目标版本不支持该参数（Redis 5.x 无此检查），则回退为不带参数重试。
+  try_smoke() {
+    local extra="$1" round="$2"
+    local log="${TMPDIR_S}/redis-${round}.log"
+    rm -f "${TMPDIR_S}/redis.pid"
+    # shellcheck disable=SC2086
+    "${OUTDIR}/redis-server" --port "$PORT" --save '' --appendonly no \
+      --daemonize yes --pidfile "${TMPDIR_S}/redis.pid" \
+      --logfile "$log" --dir "$TMPDIR_S" $extra >/dev/null 2>&1 || true
+    local i
+    for i in 1 2 3 4 5 6 7 8; do
       sleep 1
-      resp="$("${OUTDIR}/redis-cli" -p "$PORT" ping 2>/dev/null || true)"
-      [ "$resp" = "PONG" ] && { smoke_ok=yes; break; }
+      if [ "$("${OUTDIR}/redis-cli" -p "$PORT" ping 2>/dev/null || true)" = "PONG" ]; then
+        "${OUTDIR}/redis-cli" -p "$PORT" shutdown nosave >/dev/null 2>&1 || true
+        return 0
+      fi
     done
-    "${OUTDIR}/redis-cli" -p "$PORT" shutdown nosave >/dev/null 2>&1 || true
+    [ -f "$log" ] && tail -n 15 "$log" >> "${TMPDIR_S}/fail.log"
+    return 1
+  }
+
+  if [ "$ARCH" = "aarch64" ]; then
+    if try_smoke "--ignore-warnings ARM64-COW-BUG" 1; then
+      smoke_ok=yes
+      smoke_note="已忽略 ARM64-COW-BUG（构建机 THP=always）"
+    fi
   fi
+  if [ "$smoke_ok" != "yes" ] && try_smoke "" 2; then
+    smoke_ok=yes
+  fi
+
   {
     echo
     echo "--- smoke test (PING => PONG) ---"
     echo "result: ${smoke_ok}"
-    [ -f "${TMPDIR_S}/redis.log" ] && tail -n 20 "${TMPDIR_S}/redis.log"
+    [ -n "$smoke_note" ] && echo "note  : ${smoke_note}"
+    [ -f "${TMPDIR_S}/redis-1.log" ] && { echo "[log round 1]"; tail -n 20 "${TMPDIR_S}/redis-1.log"; }
+    [ -f "${TMPDIR_S}/redis-2.log" ] && { echo "[log round 2]"; tail -n 20 "${TMPDIR_S}/redis-2.log"; }
   } >> "${OUTDIR}/BUILD-INFO.txt"
-  rm -rf "$TMPDIR_S"
   if [ "$smoke_ok" != "yes" ]; then
     echo "[ERROR] 冒烟测试失败：redis-server 未能正常响应 PING" >&2
-    cat "${OUTDIR}/BUILD-INFO.txt" >&2 || true
+    cat "${TMPDIR_S}/fail.log" 2>/dev/null >&2 || true
+    rm -rf "$TMPDIR_S"
     exit 1
   fi
-  echo ">>> 冒烟测试通过（PONG）"
+  rm -rf "$TMPDIR_S"
+  echo ">>> 冒烟测试通过（PONG${smoke_note:+；${smoke_note}}）"
 fi
 
 echo "=============================================="

@@ -495,6 +495,10 @@ Native builds link the host's own OpenSSL/systemd and are the safest path for TL
    (`libssl.so.1.1`). TLS builds from the container will fail to start on those hosts. TLS is **off by default** for
    aarch64; use `build-native.sh --tls yes` on the target host instead.
 3. **Kunpeng 920** — optional `CFLAGS="-march=armv8-a+crc"` if you want explicit hardware-CRC usage.
+4. **`ARM64-COW-BUG` on startup** — if `transparent_hugepage/enabled` is `always`, Redis refuses to
+   start on aarch64 to avoid data corruption. Set THP to `madvise`/`never`, or add
+   `ignore-warnings ARM64-COW-BUG` to `redis.conf`. The smoke test passes that flag automatically
+   on aarch64 so builds don't fail on this host-level condition.
 
 ## Release semantics
 
