@@ -221,7 +221,15 @@ for f in redis-server redis-cli redis-benchmark redis-sentinel redis-check-rdb r
 done
 
 # 附带一份默认配置文件，便于对照线上 redis.conf
-[ -f "redis.conf" ] && cp -a redis.conf "${OUTDIR}/redis.conf.default"
+# 注意：部分版本源码包内的 redis.conf 权限为 0600（owner-only，root 所有），例如 Redis 8.10。
+#       若用 cp -a 原样带入，产物目录会残留一个「仅 owner 可读」的文件；此时非 root 的
+#       打包者（如 GitHub Actions 的 runner 用户）或解包用户执行 tar 会直接
+#       "Permission denied"（GNU tar 退出码 2，配合 set -e 即整体失败）。
+#       这里显式归一化为 0644，保证产物对任意用户可读。
+if [ -f "redis.conf" ]; then
+  cp -f redis.conf "${OUTDIR}/redis.conf.default"
+  chmod 0644 "${OUTDIR}/redis.conf.default"
+fi
 
 # ---------- 附带上游许可证（分发必需） ----------
 # Redis 7.2.x 及更早为 BSD-3-Clause，同样要求分发时保留版权与许可声明。
@@ -336,6 +344,13 @@ if [ "$SMOKE" = "yes" ]; then
   rm -rf "$TMPDIR_S"
   echo ">>> 冒烟测试通过（PONG${smoke_note:+；${smoke_note}}）"
 fi
+
+# ---------- 归一化产物权限（防御源码包内的非常规 mode） ----------
+# 产物包必须对「非 root 的打包者 / 解包用户」可读可执行。个别版本源码包内的文件权限
+# 并不规整（例：Redis 8.10 的 redis.conf 为 0600），一旦原样带入就会让非 root 打包失败。
+# a+rX：目录与原本就带执行位的文件保持可执行（x），普通文件只补读权限（r），
+#       不会给二进制额外放开权限。
+chmod -R a+rX "$OUTDIR" 2>/dev/null || true
 
 echo "=============================================="
 echo " 构建成功"

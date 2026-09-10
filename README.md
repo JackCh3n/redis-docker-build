@@ -412,6 +412,11 @@ sudo systemctl start redis
   与网络拉取模块源码，与"离线、可复现"目标冲突。确有需要时用 `--modules yes`。
 - **`make` 需要 GNU make ≥ 3.81**：EL7 自带 3.82，满足要求。
 - **bash 4.2 陷阱**（CentOS 7）：`set -u` 下避免 `${VAR:-$(cmd)}` 写法与空数组展开，脚本已处理。
+- **产物文件权限（易踩的坑）**：个别版本源码包内的文件权限并不规整 —— 例如 **Redis 8.10 的
+  `redis.conf` 是 `0600`**（owner-only）。若用 `cp -a` 原样带入产物目录，打包者或解包用户
+  只要不是 root，`tar` 就会报 `Permission denied`（GNU tar 退出码 2）而整体失败。
+  构建脚本已做归一化：`redis.conf.default` 显式设为 `0644`，并在收尾阶段对整个产物目录执行
+  `chmod -R a+rX`（只补读权限，不给二进制额外开放执行位）。
 
 ## 冒烟测试
 
