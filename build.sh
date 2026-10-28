@@ -98,6 +98,8 @@ bundle_and_package() {
     chmod 0755 "${d}install.sh"
     cp -f "${SCRIPT_DIR}/deploy-sentinel.sh"       "${d}deploy-sentinel.sh"
     chmod 0755 "${d}deploy-sentinel.sh"
+    cp -f "${SCRIPT_DIR}/deploy-node.sh"           "${d}deploy-node.sh"
+    chmod 0755 "${d}deploy-node.sh"
     cp -f "${SCRIPT_DIR}/assets/redis.service"     "${d}redis.service"
     cp -f "${SCRIPT_DIR}/assets/redis.conf.example" "${d}redis.conf"
   done

@@ -106,8 +106,8 @@ license notices, so **every distributed tarball must carry the upstream license 
   returns 406). Do not introduce raw `\n` inside a JSON body — escape it (see `ensure-release`).
 - The GitHub release job requires `contents: write`; CNB needs `CNB_TOKEN` (already in the env).
 - The tarballs must stay **self-contained**: the packaging step copies `install.sh`,
-  `deploy-sentinel.sh`, `assets/redis.service` and `assets/redis.conf.example` into each
-  `dist/<pkg>/` before `tar`. If you add a new asset file, add it to all three packagers
+  `deploy-node.sh`, `deploy-sentinel.sh`, `assets/redis.service` and `assets/redis.conf.example`
+  into each `dist/<pkg>/` before `tar`. If you add a new asset file, add it to all three packagers
   (`.cnb.yml`, `build.yml`, `build.sh`).
 - **Two releases per build.** Besides the rolling tag (`latest` / `latest-7.x`), every build also
   creates or updates `vRedis-<version>`, so each Redis version keeps its own tag and assets.
@@ -116,6 +116,12 @@ license notices, so **every distributed tarball must carry the upstream license 
   is treated literally).
 - The in-container smoke test (start instance → `PING` → expect `PONG`) must pass; a failing
   smoke test fails the build on purpose.
+- `deploy-node.sh` (multi-host roles) needs a real systemd host to test — it refuses to run where
+  systemd isn't init. Gotchas learned the hard way, don't regress them: sentinels **must** carry a
+  `requirepass` (otherwise `protected-mode` rejects their own non-loopback peer connections and
+  quorum is never reached); `/etc/redis` must be owned by `redis` (sentinels rewrite their own
+  config, and after a failover Redis `CONFIG REWRITE`s the replica's config — which then quotes
+  string values, so any config parser must strip quotes).
 - **Rolling releases must hold only the current version's assets.** The GitHub release job deletes
   every existing asset through the REST API (`/releases/{id}/assets`, paginated) before
   re-uploading, because the previous `gh release view --json assets` + delete loop silently did
