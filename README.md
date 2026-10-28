@@ -307,6 +307,31 @@ systemd 单元 → `/etc/systemd/system/redis.service`（自动 `enable`）、�
 
 > 未解压时也可直接安装：`sudo ./install.sh --from redis-7.2.17-aarch64.tar.gz`
 
+## 哨兵模式测试部署（一台机器验证 1 主 2 从 3 哨兵）
+
+`deploy-sentinel.sh` 用产物包在一台机器上拉起完整哨兵拓扑，并自动验证「复制 → 哨兵发现 →
+主从切换」，适合升级前在测试机上确认二进制可用、故障切换正常。端口刻意避开默认值
+（主库 16379 / 从库 16380、16381 / 哨兵 26379~26381），不会与机器上已有 Redis 冲突。
+
+```bash
+# 部署 + 完整验证（含一次 SENTINEL FAILOVER）
+sudo ./deploy-sentinel.sh --pkg redis-7.2.17-x86_64.tar.gz
+
+# 只验证拓扑与复制，不做切换
+sudo ./deploy-sentinel.sh --pkg ./redis-7.2.17-x86_64 --no-failover
+
+# 查看当前拓扑 / 清理
+./deploy-sentinel.sh --status
+sudo ./deploy-sentinel.sh --cleanup
+```
+
+脚本依次检查：从库 `master_link_status:up`、从库拒绝写入（`READONLY`）、哨兵看到 2 个从库、
+切换后新主库可写且数据不丢、旧主库降级并从库重连新主库（等收敛后再打印拓扑表）。
+任一项失败都会打印对应实例的日志尾部并退出非 0。启用密码认证加 `--password <pass>`。
+
+> 这是**测试用**拓扑：全部实例监听 `127.0.0.1`、关闭 RDB/AOF。生产哨兵请按官方文档
+> 把 3 个哨兵分散到不同机器，并保持 `sentinel monitor` 的 quorum 为多数派。
+
 ## 升级流程（线上操作参考）
 
 > ⚠️ **与 nginx 不同：Redis 没有 `kill -USR2` 式的二进制热升级**。替换二进制必须重启进程，

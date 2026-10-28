@@ -112,6 +112,17 @@ license notices, so **every distributed tarball must carry the upstream license 
   is treated literally).
 - The in-container smoke test (start instance → `PING` → expect `PONG`) must pass; a failing
   smoke test fails the build on purpose.
+- **Rolling releases must hold only the current version's assets.** The GitHub release job deletes
+  every existing asset through the REST API (`/releases/{id}/assets`, paginated) before
+  re-uploading, because the previous `gh release view --json assets` + delete loop silently did
+  nothing and left old versions piling up inside `latest-7.x`. Do not reintroduce a
+  `|| true`-swallowed delete loop — log the outcome instead.
+- **Known gap:** the CNB side only *adds* attachments (`cnbcool/attachments`), so a CNB rolling
+  release (`latest` / `latest-7.x`) accumulates assets from every version ever built. There is no
+  verified CNB API for deleting a single attachment; clean it up in the CNB UI, or switch the
+  upload step to a replace-then-upload flow once the API is confirmed.
+- `deploy-sentinel.sh` is exercised by `.github/workflows/sentinel-test.yml` (manual dispatch only).
+  If you change the ports or config generation, run that workflow once against a published package.
 
 ## Reporting issues
 

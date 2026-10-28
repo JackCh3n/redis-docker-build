@@ -292,14 +292,30 @@ jobs:
           publish() {
             local tag="$1"
             if gh release view "$tag" --json id -q .id >/dev/null 2>&1; then
-              echo ">>> Release $tag 已存在，更新附件"
-              gh release view "$tag" --json assets -q '.assets[]?.name' | while read -r f; do
-                [ -z "$f" ] && continue
-                aid=$(gh release view "$tag" --json assets -q ".assets[] | select(.name==\"$f\") | .id")
-                gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${aid}" >/dev/null 2>&1 || true
-              done
+              echo ">>> Release $tag 已存在，清理历史附件后重传"
+
+              # 滚动 Release（latest / latest-7.x）只应保留当前版本的产物。
+              # 原实现用 `gh release view --json assets` 取 id 再删，实测静默失效：
+              # 删除请求全部落空，旧版本附件一直堆在 latest 里。
+              # 改为直接走 REST API：列表接口返回的 id 一定可用，且 --paginate 覆盖多页。
+              local rid
+              rid="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" -q .id)"
+              echo ">>> release id = ${rid}"
+
+              local aid
+              while read -r aid; do
+                [ -n "$aid" ] || continue
+                if gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${aid}" >/dev/null 2>&1; then
+                  echo "    - 已删除附件 id=${aid}"
+                else
+                  echo "    ! 附件 id=${aid} 删除失败（继续）"
+                fi
+              done < <(gh api "repos/${GITHUB_REPOSITORY}/releases/${rid}/assets" --paginate -q '.[].id')
+
               for f in $FILES; do gh release upload "$tag" "$f" --clobber; done
               gh release edit "$tag" --title "$TITLE" --notes-file notes.md --draft=false
+              echo ">>> 现有附件："
+              gh release view "$tag" --json assets -q '.assets[].name'
             else
               # shellcheck disable=SC2086
               gh release create "$tag" $FILES --title "$TITLE" --notes-file notes.md --target "$GITHUB_SHA"
@@ -313,6 +329,10 @@ jobs:
           fi
 
       - name: 汇总
+        env:
+          SCENE: ${{ needs.prepare.outputs.scene }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
         run: |
           echo "场景        : $SCENE"
           echo "Redis 版本  : $VERSION"
