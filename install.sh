@@ -17,14 +17,14 @@
 # 快速开始
 # ---------------------------------------------------------------------------
 #   # 方式 1：包内直接执行（推荐）
-#   tar xzf redis-8.10.1-aarch64.tar.gz
-#   cd redis-8.10.1-aarch64
+#   tar xzf redis-8.10.3-aarch64.tar.gz
+#   cd redis-8.10.3-aarch64
 #   sudo ./install.sh
 #
 #   # 方式 2：脚本与压缩包放在同一目录
 #   sudo ./install.sh                      # 自动发现 redis-*.tar.gz
-#   sudo ./install.sh --pkg redis-8.10.1-x86_64.tar.gz
-#   sudo ./install.sh --from /tmp/redis-8.10.1-x86_64.tar.gz
+#   sudo ./install.sh --pkg redis-8.10.3-x86_64.tar.gz
+#   sudo ./install.sh --from /tmp/redis-8.10.3-x86_64.tar.gz
 #
 #   # 只想看看会不会装 / 装什么版本
 #   ./install.sh --check
@@ -139,7 +139,7 @@ bi_get() {
   sed -n "s/^[[:space:]]*$2[[:space:]]*:[[:space:]]*//p" "$1" | head -n 1 | sed 's/[[:space:]]*$//'
 }
 
-# 从 redis-server --version 提取版本号：Redis server v=7.2.16 sha=... build=...
+# 从 redis-server --version 提取版本号：Redis server v=7.2.17 sha=... build=...
 parse_server_version() {
   printf '%s' "$1" | sed -n 's/.*v=\([0-9][0-9.]*\).*/\1/p' | head -n 1
 }

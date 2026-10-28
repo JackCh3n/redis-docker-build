@@ -26,10 +26,10 @@
 
 | 分支 | Redis 线 | 默认版本 | 许可 | 滚动 Release |
 |---|---|---|---|---|
-| **`main`**（当前分支） | 8.x 线 | 8.10.1 | RSALv2 / SSPLv1 / AGPLv3 | `latest` |
-| **`7.x`** | 7.x 线 | 7.2.16 | BSD-3-Clause | `latest-7.x` |
+| **`main`**（当前分支） | 8.x 线 | 8.10.3 | RSALv2 / SSPLv1 / AGPLv3 | `latest` |
+| **`7.x`** | 7.x 线 | 7.2.17 | BSD-3-Clause | `latest-7.x` |
 
-- 两条线的**稳定版 tag 命名一致**：`vRedis-x.y.z`（例如 `vRedis-8.10.1`、`vRedis-7.2.16`）。
+- 两条线的**稳定版 tag 命名一致**：`vRedis-x.y.z`（例如 `vRedis-8.10.3`、`vRedis-7.2.17`）。
 - 每个分支的 CI 只监听自己的分支（`main` 分支听 `main`/`master`，`7.x` 分支听 `7.x`），互不触发。
 - 为什么拆分支：Redis 8.10 起官方重写了顶层 Makefile，`make` 会连带编译随包的 bundled modules（需要
   LLVM 21 + Rust 1.94 + CMake 3.25~3.31.6），与 7.x 线「裸跑 make 只编核心」的路径差别很大；
@@ -66,26 +66,33 @@
 
 | Redis 版本 | 许可协议 | x86_64 (CentOS 7.6) | aarch64 (麒麟 V10 SP3) | 说明 |
 |---|---|---|---|---|
-| **8.10.1** | **RSALv2 / SSPLv1 / AGPLv3** | **✅ 默认** | **✅ 默认** | **当前最新版**（2026-08-17）；仅核心，见下方说明 |
-| 8.4.6 / 8.6.6 / 8.8.2 | 三许可 | ✅ | ✅ | 8.10 之前的 8.x 线；仅核心 |
-| 8.0.6 / 8.2.9 | RSALv2 / SSPLv1 / AGPLv3 | ✅ | ✅ | 仅核心（core-only） |
-| 7.4.11 | RSALv2 / SSPLv1 | ✅ | ✅ | 协议变更为源码可用许可 |
-| **7.2.16** | **BSD-3-Clause** | ✅ | ✅ | **最后一个 BSD 协议版本**；本仓库 `7.x` 分支的默认版本 |
+| **8.10.3** | **RSALv2 / SSPLv1 / AGPLv3** | **✅ 默认** | **✅ 默认** | **当前最新版**（2026-10-26，安全版本）；仅核心，见下方说明 |
+| 8.4.8 / 8.6.8 / 8.8.4 | 三许可 | ✅ | ✅ | 8.10 之前的 8.x 线；仅核心（均为 2026-10-26 安全版本） |
+| 8.0.6 / 8.2.11 | RSALv2 / SSPLv1 / AGPLv3 | ✅ | ✅ | 仅核心（core-only） |
+| 7.4.12 | RSALv2 / SSPLv1 | ✅ | ✅ | 协议变更为源码可用许可（2026-10-26 安全版本） |
+| **7.2.17** | **BSD-3-Clause** | ✅ | ✅ | **最后一个 BSD 协议版本**；本仓库 `7.x` 分支的默认版本 |
 | 6.2.24 / 7.0.15 | BSD-3-Clause | ✅ | ✅ | 需 GCC ≥ 5.1（devtoolset） |
 | 5.0.14 | BSD-3-Clause | ✅ | ✅ | 系统 GCC 4.8 即可编译，最省事 |
 
 说明：
 
 - **✅** = 本项目工具链（GCC 10.2）满足要求，可直接构建；产物运行要求 `glibc ≥ 2.17`。
+- **安全更新（2026-10-26）**：8.10.3 / 8.8.4 / 8.6.8 / 8.4.8 / 8.2.11 / 7.4.12 / 7.2.17 修复了
+  cluster 模式下经 cluster bus 传播超过 4GB 的 `PUBLISH`/`SPUBLISH` 消息时的堆缓冲区溢出。
+  运行在 cluster 模式、且 bus 端口对不可信网络可达的实例应尽快升级到对应补丁版本。
+  8.10.2 另修复了「事务内已排队命令在事务执行前被撤销 ACL 仍可访问键」与 cluster bus 缺少
+  认证的问题（新增 `cluster-bus-port-protected-mode`，默认 `no`）。
 - **仅核心（core-only）**：Redis 8.10 起官方源码包已捆绑 RediSearch / RedisJSON / RedisTimeSeries /
   RedisBloom / vector-sets 源码，**裸跑 `make` 会连带编译它们**，需要
   **LLVM 21 + Rust 1.94 + CMake 3.25~3.31.6**；本项目的 glibc 2.17 编译环境无法满足，
   因此 8.x 线固定 `make build redis` 只编核心。
   产物 = 完整核心：KV、持久化（RDB/AOF）、主从复制、Cluster、Sentinel、TLS、Lua/函数脚本。
   需要 JSON / Search / TimeSeries 等模块时，请在更高 glibc 基线的机器（如麒麟 V10 SP3 本机）自行编译并单独加载。
-- Redis 官方自 8.x 起已不再把 CentOS / RHEL 7 列入测试矩阵；8.10.1 的核心编译在本项目工具链下可完成，
-  但建议先小范围验证。遇到编译报错可加 `--build-arg DEVTOOLSET=devtoolset-12`（GCC 12.2）重试。
-- 构建任意版本：手动触发 CI，或本地 `./build.sh build 8.10.1`。
+- Redis 官方自 8.x 起已不再把 CentOS / RHEL 7 列入测试矩阵；8.10.3 的构建体系与 8.10.1 逐字节一致
+  （顶层 `Makefile`、`scripts/build.sh`、`src/Makefile` 均未改动，仅核心源码与模块引用号变化），
+  而 8.10.1 已在本项目工具链下实测通过核心编译；升级后仍建议先小范围验证。
+  遇到编译报错可加 `--build-arg DEVTOOLSET=devtoolset-12`（GCC 12.2）重试。
+- 构建任意版本：手动触发 CI，或本地 `./build.sh build 8.10.3`。
 
 ### Redis 许可说明（重要）
 
@@ -107,15 +114,15 @@ Redis 7.4 变更了许可，8.0 起又**加回** AGPLv3 选项。按版本区间
 | **自建内网 Redis / 当业务基础设施用**（最常见） | **基本无影响**。三种许可都允许内部使用、修改、私有部署；限制针对的是"把 Redis 功能当托管服务对外售卖"。 | 任选一种，选 AGPLv3 最省合规沟通成本 |
 | **把本项目产物再分发给别人**（本项目在做的事） | 三种许可都**允许分发**，但都要求**携带许可证原文、不得移除版权声明**。本项目产物包已自动附 `LICENSE.redis.txt`。 | 保留许可文件 + 注明来源即可 |
 | **改了 Redis 源码并作为网络服务对外提供**（SaaS / 云厂商） | AGPLv3：须向使用者公开你修改后的完整源码（含"网络服务"条款）。<br>SSPLv1：连**提供该服务的整套管理栈**都要以 SSPL 公开。<br>RSALv2：非 copyleft，但**禁止**把 Redis 功能作为托管服务提供给第三方。 | 云厂商一般只能谈**商用许可**；禁用非 OSI 许可的组织选 **7.x（BSD）** |
-| **把 Redis 嵌进闭源商业产品对外卖** | AGPLv3 / SSPLv1 的 copyleft 会牵连到你的产品；RSALv2 相对宽松但不得"商业化该软件本身"。 | 需法务评估，或买商用许可，或留在 **7.2.16（BSD）** |
-| **企业政策禁用 AGPL / 要求 OSI 开源** | 8.x 只剩 RSALv2 / SSPLv1（均非 OSI 开源），可能过不了开源合规审查。 | 选 **7.2.16（BSD-3-Clause）**，或改用 Valkey（BSD-3-Clause 分支） |
+| **把 Redis 嵌进闭源商业产品对外卖** | AGPLv3 / SSPLv1 的 copyleft 会牵连到你的产品；RSALv2 相对宽松但不得"商业化该软件本身"。 | 需法务评估，或买商用许可，或留在 **7.2.17（BSD）** |
+| **企业政策禁用 AGPL / 要求 OSI 开源** | 8.x 只剩 RSALv2 / SSPLv1（均非 OSI 开源），可能过不了开源合规审查。 | 选 **7.2.17（BSD-3-Clause）**，或改用 Valkey（BSD-3-Clause 分支） |
 
 **一句话结论**：
 
-- 只是**自建自用 / 生产内网升级** → **8.10.1 放心用**，许可选 AGPLv3 最省事。
+- 只是**自建自用 / 生产内网升级** → **8.10.3 放心用**，许可选 AGPLv3 最省事。
 - 要**对外分发** → 带上许可证原文（本项目已自动处理，无需手工干预）。
 - 要**做 Redis-as-a-Service 或嵌进闭源商业产品** → **不要依赖 8.x 的标准许可**，要么买商用许可，
-  要么留在 **7.2.16（BSD）**（本仓库 `7.x` 分支）。
+  要么留在 **7.2.17（BSD）**（本仓库 `7.x` 分支）。
 
 补充：
 
@@ -168,14 +175,14 @@ Redis 7.4 变更了许可，8.0 起又**加回** AGPLv3 选项。按版本区间
 # 1b. 仅构建 aarch64 镜像（x86_64 主机需先注册 QEMU，脚本会自动处理）
 ./build.sh image aarch64
 
-# 2a. 构建默认版本（8.10.1）本机架构产物
+# 2a. 构建默认版本（8.10.3）本机架构产物
 ./build.sh build
 
 # 2b. 指定版本 + 架构 + 分配器
-./build.sh build 8.10.1 aarch64 auto
+./build.sh build 8.10.3 aarch64 auto
 
 # 2c. 一次构建 x86_64 + aarch64 两套
-./build.sh all 8.10.1
+./build.sh all 8.10.3
 
 # 产物输出到 ./dist/redis-<版本>-<架构>/
 ```
@@ -186,13 +193,13 @@ Redis 7.4 变更了许可，8.0 起又**加回** AGPLv3 选项。按版本区间
 docker build -t redis-builder:el7 .
 
 docker run --rm -v "$PWD/dist:/opt/dist" redis-builder:el7 \
-  --redis-version 8.10.1 --malloc auto --smoke yes --output /opt/dist
+  --redis-version 8.10.3 --malloc auto --smoke yes --output /opt/dist
 
 # aarch64（需 QEMU 已注册：docker run --privileged --rm tonistiigi/binfmt --install arm64）
 docker buildx build --platform linux/arm64 \
   --build-arg BASE_IMAGE=arm64v8/centos:7 -t redis-builder:el7-arm --load .
 docker run --rm --platform linux/arm64 -v "$PWD/dist:/opt/dist" redis-builder:el7-arm \
-  --redis-version 8.10.1 --output /opt/dist
+  --redis-version 8.10.3 --output /opt/dist
 ```
 
 ### 方式三：目标机原生编译（麒麟 / 信创推荐）
@@ -206,7 +213,7 @@ docker run --rm --platform linux/arm64 -v "$PWD/dist:/opt/dist" redis-builder:el
 ./build-native.sh
 
 # 指定版本 / 分配器 / 开启 TLS
-./build-native.sh 8.10.1 jemalloc yes
+./build-native.sh 8.10.3 jemalloc yes
 
 # 需要脚本代为安装依赖（yum/dnf/apt）
 ./build-native.sh --install-deps
@@ -219,7 +226,7 @@ docker run --rm --platform linux/arm64 -v "$PWD/dist:/opt/dist" redis-builder:el
 
 | 命令行参数 | 环境变量 | 默认值 | 说明 |
 |---|---|---|---|
-| `--redis-version` | `REDIS_VERSION` | `8.10.1` | Redis 版本号 |
+| `--redis-version` | `REDIS_VERSION` | `8.10.3` | Redis 版本号 |
 | `--prefix` | `REDIS_PREFIX` | `/usr/local` | `make install PREFIX=` 安装前缀 |
 | `--output` | `OUTPUT_DIR` | `/opt/dist` | 产物输出目录 |
 | `--malloc` | `REDIS_MALLOC` | `auto` | `auto` \| `jemalloc` \| `libc` |
@@ -285,16 +292,16 @@ make ... CFLAGS="-march=armv8-a+crc -O2"
 
 | 触发方式 | 场景 | 构建内容 | Release |
 |---|---|---|---|
-| push 到 `main` / `master` | **主线版本（8.x 线）** | 默认版本 8.10.1（x86_64 + aarch64） | `latest`（每次推送覆盖更新） |
+| push 到 `main` / `master` | **主线版本（8.x 线）** | 默认版本 8.10.3（x86_64 + aarch64） | `latest`（每次推送覆盖更新） |
 | git tag `vRedis-x.y.z` | **稳定版** | 仅该版本（x86_64 + aarch64） | tag 同名 Release（固化） |
 | GitHub 手动触发 | 任意版本/分配器/架构 | 按输入构建 | `vRedis-{版本}` |
 
 ```bash
-# 发布稳定版 Redis 8.10.1
-git tag vRedis-8.10.1 && git push --tags
+# 发布稳定版 Redis 8.10.3
+git tag vRedis-8.10.3 && git push --tags
 
 # 更新稳定版（同版本重打 tag）
-git tag -f vRedis-8.10.1 && git push --force --tags
+git tag -f vRedis-8.10.3 && git push --force --tags
 ```
 
 ## 一键安装 / 更新（推荐）
@@ -304,8 +311,8 @@ git tag -f vRedis-8.10.1 && git push --force --tags
 
 ```bash
 # 1) 解压产物包（在目标机执行）
-tar xzf redis-8.10.1-aarch64.tar.gz
-cd redis-8.10.1-aarch64
+tar xzf redis-8.10.3-aarch64.tar.gz
+cd redis-8.10.3-aarch64
 
 # 2) 一键安装 / 更新
 sudo ./install.sh
@@ -330,7 +337,7 @@ systemd 单元 → `/etc/systemd/system/redis.service`（自动 `enable`）、�
 常用参数：`--pkg <包>`、`--from <路径>`、`--dir <目录>`、`--prefix <目录>`、`--force`、
 `--check`、`--no-systemd`、`--no-config`、`--uninstall`（完整说明见 `./install.sh --help`）。
 
-> 未解压时也可直接安装：`sudo ./install.sh --from redis-8.10.1-aarch64.tar.gz`
+> 未解压时也可直接安装：`sudo ./install.sh --from redis-8.10.3-aarch64.tar.gz`
 
 ## 升级流程（线上操作参考）
 
@@ -380,9 +387,9 @@ redis-cli -a '<password>' bgsave && sleep 2      # 落盘最新数据
 sudo systemctl stop redis
 
 # 3. 替换二进制（只换可执行文件，配置与数据目录不动）
-sudo cp dist/redis-8.10.1-x86_64/redis-server  /usr/local/bin/redis-server
-sudo cp dist/redis-8.10.1-x86_64/redis-cli     /usr/local/bin/redis-cli
-sudo cp dist/redis-8.10.1-x86_64/redis-sentinel /usr/local/bin/redis-sentinel 2>/dev/null || true
+sudo cp dist/redis-8.10.3-x86_64/redis-server  /usr/local/bin/redis-server
+sudo cp dist/redis-8.10.3-x86_64/redis-cli     /usr/local/bin/redis-cli
+sudo cp dist/redis-8.10.3-x86_64/redis-sentinel /usr/local/bin/redis-sentinel 2>/dev/null || true
 
 # 4. 启动并验证
 sudo systemctl start redis
@@ -513,11 +520,11 @@ Unlike nginx, Redis has far fewer dynamic dependencies but much stricter compile
 
 | Version | License | x86_64 | aarch64 | Note |
 |---|---|---|---|---|
-| **8.10.1** | **RSALv2 / SSPLv1 / AGPLv3** | **✅ default** | **✅ default** | **Latest** (2026-08-17); core-only |
-| 8.4.6 / 8.6.6 / 8.8.2 | tri-license | ✅ | ✅ | 8.x line prior to 8.10; core-only |
-| 8.0.6 / 8.2.9 | RSALv2 / SSPLv1 / AGPLv3 | ✅ | ✅ | core-only build |
-| 7.4.11 | RSALv2 / SSPLv1 | ✅ | ✅ | Source-available licensing |
-| **7.2.16** | **BSD-3-Clause** | ✅ | ✅ | **Last BSD release**; default of the `7.x` branch |
+| **8.10.3** | **RSALv2 / SSPLv1 / AGPLv3** | **✅ default** | **✅ default** | **Latest** (2026-10-26, security release); core-only |
+| 8.4.8 / 8.6.8 / 8.8.4 | tri-license | ✅ | ✅ | 8.x line prior to 8.10; core-only (all 2026-10-26 security releases) |
+| 8.0.6 / 8.2.11 | RSALv2 / SSPLv1 / AGPLv3 | ✅ | ✅ | core-only build |
+| 7.4.12 | RSALv2 / SSPLv1 | ✅ | ✅ | Source-available licensing (2026-10-26 security release) |
+| **7.2.17** | **BSD-3-Clause** | ✅ | ✅ | **Last BSD release**; default of the `7.x` branch |
 | 6.2.24 / 7.0.15 | BSD-3-Clause | ✅ | ✅ | Requires GCC ≥ 5.1 |
 | 5.0.14 | BSD-3-Clause | ✅ | ✅ | Builds even with stock GCC 4.8 |
 
@@ -527,8 +534,16 @@ Unlike nginx, Redis has far fewer dynamic dependencies but much stricter compile
   CMake 3.25–3.31.6**, which a glibc 2.17 toolchain cannot provide. The 8.x line therefore pins
   `make build redis` (core only): KV, persistence (RDB/AOF), replication, Cluster, Sentinel, TLS, scripting.
   Need JSON/Search? Build those modules yourself on a newer-glibc host (e.g. Kylin V10 SP3) and load them separately.
-- Upstream dropped CentOS/RHEL 7 from its test matrix at 8.x. The 8.10.1 core build succeeds with this
-  toolchain; retry with `--build-arg DEVTOOLSET=devtoolset-12` (GCC 12.2) if you hit compiler errors.
+- **Security updates (2026-10-26)**: 8.10.3 / 8.8.4 / 8.6.8 / 8.4.8 / 8.2.11 / 7.4.12 / 7.2.17 fix a heap
+  buffer overflow when propagating a `PUBLISH`/`SPUBLISH` message larger than 4GB over the cluster bus.
+  Cluster-mode deployments whose bus port is reachable from untrusted networks should upgrade to the
+  corresponding patch. 8.10.2 additionally fixed ACL revocation not applying to commands already queued
+  in a transaction, and added `cluster-bus-port-protected-mode` (default `no`) to make an unauthenticated
+  cluster bus an explicit choice.
+- Upstream dropped CentOS/RHEL 7 from its test matrix at 8.x. 8.10.3 uses a build system byte-identical to
+  8.10.1 (`Makefile`, `scripts/build.sh` and `src/Makefile` are unchanged), and 8.10.1 has been verified to
+  compile core-only with this toolchain; still, validate on a small scale first. Retry with
+  `--build-arg DEVTOOLSET=devtoolset-12` (GCC 12.2) if you hit compiler errors.
 
 ### Licensing
 
@@ -544,11 +559,11 @@ Unlike nginx, Redis has far fewer dynamic dependencies but much stricter compile
 | Redistributing these binaries (what this project does) | All three permit it, but you **must ship the license text and keep notices**. This project bundles `LICENSE.redis.txt` automatically. |
 | Modifying Redis and serving it over a network (SaaS / cloud) | AGPLv3 → publish your modified source; SSPLv1 → publish the whole service stack; RSALv2 → not copyleft, but you may not offer Redis functionality as a managed service to third parties. |
 | Embedding in a closed-source product you sell | AGPLv3 / SSPLv1 copyleft reaches into your product; RSALv2 is looser but bars commercializing the software itself. |
-| Corporate policy forbids AGPL / mandates OSI | 8.x leaves only non-OSI options → stay on **7.2.16 (BSD)** or use Valkey (BSD-3-Clause). |
+| Corporate policy forbids AGPL / mandates OSI | 8.x leaves only non-OSI options → stay on **7.2.17 (BSD)** or use Valkey (BSD-3-Clause). |
 
-**Bottom line**: internal use → 8.10.1 is fine; redistribution → ship the license text (handled here);
+**Bottom line**: internal use → 8.10.3 is fine; redistribution → ship the license text (handled here);
 managed service or closed-source embedding → don't rely on the standard 8.x licenses, stay on
-**7.2.16 (BSD)** or buy a commercial license.
+**7.2.17 (BSD)** or buy a commercial license.
 
 ## Quick start
 
@@ -563,8 +578,8 @@ managed service or closed-source embedding → don't rely on the standard 8.x li
 Each tarball is self-contained (`install.sh` + `redis.service` + `redis.conf` + `LICENSE` + `LICENSE.redis.txt` inside):
 
 ```bash
-tar xzf redis-8.10.1-aarch64.tar.gz
-cd redis-8.10.1-aarch64
+tar xzf redis-8.10.3-aarch64.tar.gz
+cd redis-8.10.3-aarch64
 sudo ./install.sh          # install, or in-place update (auto version compare)
 ./install.sh --check       # dry run: show what would happen
 ```
@@ -574,9 +589,9 @@ sudo ./install.sh          # install, or in-place update (auto version compare)
 ```bash
 ./build.sh image                 # build builder image for host arch
 ./build.sh image aarch64         # build aarch64 builder image (auto-registers QEMU)
-./build.sh build                 # build default version (8.10.1)
-./build.sh build 8.10.1 aarch64  # version + arch
-./build.sh all 8.10.1            # both arches
+./build.sh build                 # build default version (8.10.3)
+./build.sh build 8.10.3 aarch64  # version + arch
+./build.sh all 8.10.3            # both arches
 ```
 
 Raw `docker` equivalent:
@@ -584,14 +599,14 @@ Raw `docker` equivalent:
 ```bash
 docker build -t redis-builder:el7 .
 docker run --rm -v "$PWD/dist:/opt/dist" redis-builder:el7 \
-  --redis-version 8.10.1 --malloc auto --smoke yes --output /opt/dist
+  --redis-version 8.10.3 --malloc auto --smoke yes --output /opt/dist
 ```
 
 ### Option 4: Native build on the target host (Kylin / offline)
 
 ```bash
 ./build-native.sh                    # auto-detects OS / glibc / gcc / page size
-./build-native.sh 8.10.1 jemalloc yes # version / allocator / TLS
+./build-native.sh 8.10.3 jemalloc yes # version / allocator / TLS
 ./build-native.sh --install-deps      # let it install build deps via yum/dnf/apt
 ```
 
@@ -601,7 +616,7 @@ Native builds link the host's own OpenSSL/systemd and are the safest path for TL
 
 | Flag | Env var | Default | Description |
 |---|---|---|---|
-| `--redis-version` | `REDIS_VERSION` | `8.10.1` | Redis version |
+| `--redis-version` | `REDIS_VERSION` | `8.10.3` | Redis version |
 | `--prefix` | `REDIS_PREFIX` | `/usr/local` | `make install PREFIX=` |
 | `--output` | `OUTPUT_DIR` | `/opt/dist` | Artifact output dir |
 | `--malloc` | `REDIS_MALLOC` | `auto` | `auto` \| `jemalloc` \| `libc` |
@@ -632,7 +647,7 @@ Native builds link the host's own OpenSSL/systemd and are the safest path for TL
 
 | Trigger | Builds | Release |
 |---|---|---|
-| push to `main` / `master` | default version 8.10.1 (both arches) | `latest` (rolling) |
+| push to `main` / `master` | default version 8.10.3 (both arches) | `latest` (rolling) |
 | tag `vRedis-x.y.z` | that version only | tag-named release (frozen) |
 | manual dispatch | any version/allocator/arch | `vRedis-{version}` |
 

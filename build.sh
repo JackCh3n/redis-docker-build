@@ -9,9 +9,9 @@
 #   ./build.sh native [版本] [malloc]                     # 当前主机原生编译（无需 Docker）
 #
 # 示例：
-#   ./build.sh build                       # 默认版本 8.10.1，本机架构
-#   ./build.sh build 8.10.1 aarch64        # 构建 aarch64 的 Redis 8.10.1
-#   ./build.sh build 7.2.16 x86_64 libc    # 指定 libc 分配器
+#   ./build.sh build                       # 默认版本 8.10.3，本机架构
+#   ./build.sh build 8.10.3 aarch64        # 构建 aarch64 的 Redis 8.10.3
+#   ./build.sh build 7.2.17 x86_64 libc    # 指定 libc 分配器
 #
 # 说明：aarch64 镜像在 x86_64 主机上构建需要 QEMU（binutils-qemu-static 或
 #       docker run --privileged tonistiigi/binfmt --install arm64）。若主机本身
@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 IMAGE_TAG="redis-builder:el7"
-DEFAULT_VERSION="8.10.1"
+DEFAULT_VERSION="8.10.3"
 DIST_DIR="${SCRIPT_DIR}/dist"
 mkdir -p "$DIST_DIR"
 
