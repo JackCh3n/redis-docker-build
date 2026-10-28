@@ -116,8 +116,9 @@
 ```
 
 > 产物包（`redis-<版本>-<架构>.tar.gz`）是**自包含**的：除二进制外还包含
-> `install.sh` / `redis.service` / `redis.conf` / `LICENSE`（本项目 MIT）/ `LICENSE.redis.txt`
-> （上游 Redis 许可证原文）/ `BUILD-INFO.txt`，解压后即可离线一键安装。
+> `install.sh` / `deploy-sentinel.sh` / `redis.service` / `redis.conf` / `LICENSE`（本项目 MIT）
+> / `LICENSE.redis.txt`（上游 Redis 许可证原文）/ `BUILD-INFO.txt`，解压后即可离线一键安装，
+> 也能直接跑哨兵测试（`sudo ./deploy-sentinel.sh --pkg .`）。
 
 ## 快速开始
 
@@ -260,9 +261,13 @@ make ... CFLAGS="-march=armv8-a+crc -O2"
 
 | 触发方式 | 场景 | 构建内容 | Release |
 |---|---|---|---|
-| push 到 `7.x` | **主线版本（7.x 线）** | 默认版本 7.2.17（x86_64 + aarch64） | `latest-7.x`（每次推送覆盖更新） |
+| push 到 `7.x` | **主线版本（7.x 线）** | 默认版本 7.2.17（x86_64 + aarch64） | `latest-7.x`（滚动覆盖）**+ `vRedis-7.2.17`（按版本独立）** |
 | git tag `vRedis-x.y.z` | **稳定版** | 仅该版本（x86_64 + aarch64） | tag 同名 Release（固化） |
 | GitHub 手动触发 | 任意版本/分配器/架构 | 按输入构建 | `vRedis-{版本}` |
+
+**每个版本都有自己的 Release**：主线构建除更新滚动 `latest-7.x` 外，还会创建（或更新）`vRedis-<版本>`，
+所以 `vRedis-8.10.3`、`vRedis-7.2.17` 各自是一个独立标签，可以直接按版本下载与回滚；
+滚动 `latest-7.x` 只保留**当前默认版本**的两个架构产物，不会混入历史版本。
 
 ```bash
 # 发布稳定版 Redis 7.2.17
@@ -420,15 +425,170 @@ requirepass <sentinel-pass>   # 只保护哨兵自身的 SENTINEL 命令，可�
   Sentinel 模式）通过 `SENTINEL get-master-addr-by-name` 发现当前主库；或者在前置 VIP /
   HAProxy 上做健康检查转发。
 
-### 上线顺序与验收
+### 分步部署（以 3 台为例：1 主 + 2 从 + 3 哨兵）
 
-1. 起主库 → `redis-cli -h 10.0.0.11 -a '<pass>' ping` 返回 PONG。
-2. 起两个从库 → `info replication` 里 `master_link_status:up`，主库 `connected_slaves:2`。
-3. 最后起 3 个哨兵（错开几秒，避免同时进入选举）：
-   `sentinel master mymaster` 应看到 `num-slaves 2`、`flags master`；
-   `sentinel sentinels mymaster` 应能看到另外两个哨兵。
-4. 验收切换：`sentinel failover mymaster`（或直接停主库进程），确认新主被选出、
-   原主库降级为从库并完成同步。
+约定（按自己环境替换 IP / 密码）：
+
+| 机器 | 角色 |
+|---|---|
+| `10.0.0.11` (node-a) | Redis 主库 + Sentinel |
+| `10.0.0.12` (node-b) | Redis 从库 + Sentinel |
+| `10.0.0.13` (node-c) | Redis 从库 + Sentinel |
+
+三台机器上的口令统一为 `<pass>`；哨兵监控名统一用 `mymaster`。
+
+**第 1 步：三台机器都装二进制**（产物包里有 `install.sh`）
+
+```bash
+tar xzf redis-8.10.3-x86_64.tar.gz
+cd redis-8.10.3-x86_64
+sudo ./install.sh        # 装二进制 + /etc/redis/redis.conf + systemd 单元，不会自动启动
+```
+
+**第 2 步：配置并启动主库（只在 node-a）**
+
+```bash
+sudo vi /etc/redis/redis.conf
+```
+```conf
+bind 0.0.0.0
+protected-mode yes
+requirepass <pass>
+masterauth <pass>        # 切换后自己会变成从库，必须能连新主库
+appendonly yes
+replica-announce-ip 10.0.0.11   # 让哨兵/从库看到可达地址，NAT 环境尤其重要
+```
+```bash
+sudo systemctl start redis
+redis-cli -a '<pass>' ping        # PONG
+```
+
+**第 3 步：配置并启动两个从库（node-b / node-c）**
+
+在第 2 步的配置基础上，只多一行 `replicaof`：
+
+```bash
+echo 'replicaof 10.0.0.11 6379' | sudo tee -a /etc/redis/redis.conf
+# 同时把 replica-announce-ip 改成各自的本机内网 IP（10.0.0.12 / 10.0.0.13）
+sudo systemctl start redis
+
+redis-cli -a '<pass>' info replication | grep -E 'role|master_link_status|master_host'
+# 期望 role:slave、master_link_status:up
+```
+
+回到主库确认：
+
+```bash
+redis-cli -a '<pass>' info replication | grep connected_slaves   # connected_slaves:2
+redis-cli -a '<pass>' set demo hello && redis-cli -a '<pass>' -h 10.0.0.12 get demo
+```
+
+**第 4 步：三台机器各起一个哨兵**
+
+哨兵配置文件（三台内容相同，只有 `dir` / 端口可不同）：
+
+```bash
+sudo mkdir -p /var/lib/redis-sentinel
+sudo tee /etc/redis/sentinel.conf >/dev/null <<'EOF'
+port 26379
+bind 0.0.0.0
+daemonize no
+dir /var/lib/redis-sentinel
+sentinel monitor mymaster 10.0.0.11 6379 2
+sentinel auth-pass mymaster <pass>
+sentinel down-after-milliseconds mymaster 5000
+sentinel failover-timeout mymaster 60000
+sentinel parallel-syncs mymaster 1
+EOF
+sudo chown redis:redis /etc/redis/sentinel.conf
+sudo chown -R redis:redis /var/lib/redis-sentinel
+```
+
+哨兵 systemd 单元（产物包**没有**附带，需自己创建一次）：
+
+```bash
+sudo tee /etc/systemd/system/redis-sentinel.service >/dev/null <<'EOF'
+[Unit]
+Description=Redis Sentinel
+After=network.target
+
+[Service]
+Type=simple
+User=redis
+Group=redis
+ExecStart=/usr/local/bin/redis-server /etc/redis/sentinel.conf --sentinel
+Restart=always
+LimitNOFILE=10032
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now redis-sentinel
+```
+
+> 三台错开几秒启动，避免哨兵同时进入选举。哨兵会**改写** `sentinel.conf`（记录 epoch、
+> 已知哨兵与从库），所以该文件必须对 `redis` 用户可写，也不要交给「每次强制还原」的
+> 配置管理流程。
+
+**第 5 步：确认拓扑**
+
+```bash
+redis-cli -p 26379 sentinel master mymaster       # num-slaves 2、flags master
+redis-cli -p 26379 sentinel replicas mymaster     # 两个从库的 ip/port
+redis-cli -p 26379 sentinel sentinels mymaster    # 另外两个哨兵（约 10s 内出现）
+```
+
+**第 6 步：故障演练（务必在业务低峰做）**
+
+```bash
+# 1) 停掉主库
+sudo systemctl stop redis            # 在 node-a 上
+
+# 2) 5~10 秒后（down-after 5s + 选举），在任意哨兵上查新主
+redis-cli -p 26379 sentinel get-master-addr-by-name mymaster
+# 期望返回 10.0.0.12 或 10.0.0.13
+
+# 3) 新主应为 master，另一个从库仍在同步
+redis-cli -h 10.0.0.12 -a '<pass>' info replication | grep -E 'role|connected_slaves'
+
+# 4) 把原主库拉起来，它会自动作为从库加入
+sudo systemctl start redis           # 在 node-a 上
+redis-cli -a '<pass>' info replication | grep role      # role:slave
+```
+
+**网络放通**
+
+| 方向 | 端口 | 用途 |
+|---|---|---|
+| 数据节点之间 | 6379 | 主从复制 |
+| 哨兵 ↔ 哨兵、客户端 ↔ 哨兵 | 26379 | 互相发现、客户端查询主库 |
+| 客户端 → 数据节点 | 6379 | 实际读写 |
+
+不要把 6379 / 26379 直接暴露到公网：能连哨兵就等于能改你的拓扑。
+
+**客户端接入**（不要写死主库 IP，用哨兵模式）
+
+```python
+# Python
+from redis.sentinel import Sentinel
+sentinel = Sentinel([("10.0.0.11", 26379), ("10.0.0.12", 26379), ("10.0.0.13", 26379)],
+                    password="<pass>", socket_timeout=0.5)
+master = sentinel.master_for("mymaster", password="<pass>")
+print(master.get("demo"))
+```
+
+```javascript
+// Node.js (ioredis)
+const Redis = require("ioredis");
+const client = new Redis({
+  sentinels: [{ host: "10.0.0.11", port: 26379 },
+              { host: "10.0.0.12", port: 26379 },
+              { host: "10.0.0.13", port: 26379 }],
+  name: "mymaster",
+  password: "<pass>",
+});
+```
 
 ### 与脚本的分工
 
@@ -436,7 +596,7 @@ requirepass <sentinel-pass>   # 只保护哨兵自身的 SENTINEL 命令，可�
 |---|---|
 | 编译产物、装包、单机冒烟 | `install.sh` |
 | 单机拉起 1 主 2 从 3 哨兵，验证二进制与切换流程 | `deploy-sentinel.sh` |
-| 生产多机拓扑 | 按本节配置 + 你现有的配置管理（Ansible / Salt / 手工），脚本不负责多机分发 |
+| 生产多机拓扑 | 按本节分步操作 + 你现有的配置管理（Ansible / Salt / 手工），脚本不负责多机分发 |
 
 `deploy-sentinel.sh` 模拟不了跨机器网络分区、时钟偏差、整机断电这类故障——这些只能在多机环境验证。
 
@@ -655,7 +815,7 @@ Self-hosted internal use is unaffected by these restrictions. If your policy for
 
 ### Option 2: One-click offline install
 
-Each tarball is self-contained (`install.sh` + `redis.service` + `redis.conf` + `LICENSE` + `LICENSE.redis.txt` inside):
+Each tarball is self-contained (`install.sh` + `deploy-sentinel.sh` + `redis.service` + `redis.conf` + `LICENSE` + `LICENSE.redis.txt` inside):
 
 ```bash
 tar xzf redis-7.2.17-aarch64.tar.gz
@@ -727,9 +887,12 @@ Native builds link the host's own OpenSSL/systemd and are the safest path for TL
 
 | Trigger | Builds | Release |
 |---|---|---|
-| push to `7.x` | default version (both arches) | `latest-7.x` (rolling) |
+| push to `7.x` | default version 7.2.17 (both arches) | `latest-7.x` (rolling) **+ `vRedis-7.2.17` (per version)** |
 | tag `vRedis-x.y.z` | that version only | tag-named release (frozen) |
 | manual dispatch | any version/allocator/arch | `vRedis-{version}` |
+
+Every build also lands in a **version-specific release** (`vRedis-x.y.z`), so 7.2.17 and 8.10.3
+each keep their own tag and assets; the rolling `latest-7.x` only carries the current default version.
 
 ## Production Sentinel topology (multi-host)
 
@@ -766,8 +929,52 @@ Notes that bite in practice:
   writable and don't let a config-management tool overwrite it on every run.
 - Clients must not hard-code the master IP — use a Sentinel-aware client
   (`SENTINEL get-master-addr-by-name`) or a VIP/HAProxy in front.
-- Bring-up order: master → replicas (`master_link_status:up`) → sentinels; verify with
-  `sentinel master mymaster` (`num-slaves`, `flags`) and `sentinel sentinels mymaster`.
+
+**Step-by-step (node-a master, node-b/node-c replicas, one sentinel per host):**
+
+```bash
+# 1) every host: unpack the release tarball and install the binaries
+tar xzf redis-8.10.3-x86_64.tar.gz && cd redis-8.10.3-x86_64
+sudo ./install.sh                    # binaries + /etc/redis/redis.conf + unit; does NOT start it
+
+# 2) node-a: set bind/requirepass/masterauth/replica-announce-ip in /etc/redis/redis.conf
+sudo systemctl start redis && redis-cli -a '<pass>' ping
+
+# 3) node-b / node-c: same settings, plus
+echo 'replicaof 10.0.0.11 6379' | sudo tee -a /etc/redis/redis.conf
+sudo systemctl start redis
+redis-cli -a '<pass>' info replication | grep -E 'role|master_link_status'   # role:slave, up
+
+# 4) all three: sentinel.conf (see above), then a unit (not shipped in the tarball)
+sudo tee /etc/systemd/system/redis-sentinel.service >/dev/null <<'EOF'
+[Unit]
+Description=Redis Sentinel
+After=network.target
+[Service]
+Type=simple
+User=redis
+Group=redis
+ExecStart=/usr/local/bin/redis-server /etc/redis/sentinel.conf --sentinel
+Restart=always
+LimitNOFILE=10032
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo chown redis:redis /etc/redis/sentinel.conf
+sudo systemctl daemon-reload && sudo systemctl enable --now redis-sentinel
+
+# 5) verify from any sentinel
+redis-cli -p 26379 sentinel master mymaster       # num-slaves 2, flags master
+redis-cli -p 26379 sentinel sentinels mymaster    # the other two sentinels
+
+# 6) failover drill: stop the master, watch the new one appear, then bring the old one back as replica
+sudo systemctl stop redis                          # on node-a
+redis-cli -p 26379 sentinel get-master-addr-by-name mymaster
+sudo systemctl start redis                         # node-a rejoins as replica
+```
+
+Allow 6379 between data nodes, and 26379 between sentinels and from clients. Never expose either
+port to the public internet — whoever can reach a sentinel can rewrite your topology.
 
 The script cannot emulate cross-host partitions, clock skew or whole-machine loss; those must be
 tested on the real multi-host layout.
