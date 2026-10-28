@@ -142,6 +142,7 @@
         [ -d "$d" ] || continue
         install -m 0755 install.sh "${d}install.sh"
         install -m 0755 deploy-sentinel.sh "${d}deploy-sentinel.sh"
+        install -m 0755 deploy-node.sh "${d}deploy-node.sh"
         install -m 0644 assets/redis.service "${d}redis.service"
         install -m 0644 assets/redis.conf.example "${d}redis.conf"
         # 项目自身许可证（MIT）；上游 Redis 许可证由 build-redis.sh 生成 LICENSE.redis.txt

@@ -98,6 +98,8 @@ bundle_and_package() {
     chmod 0755 "${d}install.sh"
     cp -f "${SCRIPT_DIR}/deploy-sentinel.sh"       "${d}deploy-sentinel.sh"
     chmod 0755 "${d}deploy-sentinel.sh"
+    cp -f "${SCRIPT_DIR}/deploy-node.sh"           "${d}deploy-node.sh"
+    chmod 0755 "${d}deploy-node.sh"
     cp -f "${SCRIPT_DIR}/assets/redis.service"     "${d}redis.service"
     cp -f "${SCRIPT_DIR}/assets/redis.conf.example" "${d}redis.conf"
     # 项目自身许可证（MIT）；上游 Redis 许可证由 build-redis.sh 生成 LICENSE.redis.txt

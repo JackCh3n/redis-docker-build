@@ -142,6 +142,7 @@ Redis 7.4 变更了许可，8.0 起又**加回** AGPLv3 选项。按版本区间
 ├── build-native.sh                # 目标机原生编译（麒麟/信创，无需 Docker）
 ├── install.sh                     # 一键安装/更新脚本（纯离线，随产物包分发）
 ├── deploy-sentinel.sh             # 单机哨兵拓扑部署与故障切换验证（测试用）
+├── deploy-node.sh                 # 多机分角色部署：master / replica / sentinel，配置自动生成
 ├── .github/workflows/build.yml    # GitHub Actions 流水线（x86_64 + aarch64）
 ├── .cnb.yml                       # CNB (cnb.cool) 流水线（x86_64 + aarch64 双架构）
 ├── assets/
@@ -151,9 +152,9 @@ Redis 7.4 变更了许可，8.0 起又**加回** AGPLv3 选项。按版本区间
 ```
 
 > 产物包（`redis-<版本>-<架构>.tar.gz`）是**自包含**的：除二进制外还包含
-> `install.sh` / `deploy-sentinel.sh` / `redis.service` / `redis.conf` / `LICENSE`（本项目 MIT）
-> / `LICENSE.redis.txt`（上游 Redis 许可证原文）/ `BUILD-INFO.txt`，解压后即可离线一键安装，
-> 也能直接跑哨兵测试（`sudo ./deploy-sentinel.sh --pkg .`）。
+> `install.sh` / `deploy-node.sh` / `deploy-sentinel.sh` / `redis.service` / `redis.conf` /
+> `LICENSE`（本项目 MIT）/ `LICENSE.redis.txt`（上游 Redis 许可证原文）/ `BUILD-INFO.txt`，
+> 解压后即可离线一键安装，也能直接做多机分角色部署或单机哨兵测试。
 
 ## 快速开始
 
@@ -389,6 +390,61 @@ sudo ./deploy-sentinel.sh --cleanup
 切换都正常」，但**不能**当作生产拓扑。单机上 3 个哨兵共享同一个内核、同一块网卡、同一个电源：
 进程级故障能扛，机器级故障直接全灭，quorum 也就失去意义。
 
+### 懒人模式：一条命令一个角色（`deploy-node.sh`）
+
+`redis.conf` / `sentinel.conf` / systemd 单元都由脚本按当前环境生成，只需要告诉它「角色 + 密码 +
+端口」。以下是完整的三机流程，逐条复制即可：
+
+```bash
+# ① A 机（主库）：只需要密码和端口
+sudo ./deploy-node.sh master --password 'YourPass' --port 6379
+#   脚本会打印出后面两条命令（IP 已自动填好），直接复制到 B、C 上执行
+
+# ② B、C 机（从库）
+sudo ./deploy-node.sh replica --master-host <A的IP> --password 'YourPass'
+
+# ③ A、B、C 三台都执行（哨兵）
+sudo ./deploy-node.sh sentinel --master-host <A的IP> --password 'YourPass' --quorum 2
+```
+
+**自动优化的部分**（全部按当前机器实测值推算，并在执行前打印出来）：
+
+| 项目 | 依据 | 规则 |
+|---|---|---|
+| `maxmemory` | `/proc/meminfo` | 整机内存 60%（单机测试模式按实例数分摊），可用 `--maxmemory` 覆盖 |
+| `io-threads` | `nproc` | ≥ 4 核才启用，取核数一半、上限 8，并打开 `io-threads-do-reads` |
+| 持久化 | 固定策略 | AOF `everysec` + RDB 兜底快照（`3600 1 / 300 100 / 60 10000`） |
+| 主从 | 固定策略 | `repl-diskless-sync yes`、`repl-backlog-size 64mb`、只读从库 |
+| `replica-announce-ip` | 自动探测内网 IP | NAT / 云主机下让哨兵与从库拿到可达地址（可 `--announce-ip` 覆盖） |
+| THP / `overcommit_memory` | 内核当前值 | 不合规时给出精确的修改命令提示 |
+| 文件句柄 | systemd 单元 | `LimitNOFILE=65535`；`RuntimeDirectory` 自动创建 `/run/redis-<port>` |
+
+其它常用参数：`--bind-ip`（默认自动探测的内网 IP + 127.0.0.1）、`--policy`（`maxmemory-policy`，
+默认 `noeviction`，纯缓存可给 `allkeys-lru`）、`--master-name`、`--no-start`、`--dry-run`（只打印
+将要写入的配置，不落盘）、`--force`（覆盖已有配置，会先备份）。
+
+日常运维也用同一个脚本：
+
+```bash
+sudo ./deploy-node.sh status              # 列出本机实例、端口、角色、主从链路状态
+sudo ./deploy-node.sh uninstall           # 停服并禁用（保留配置与数据）
+sudo ./deploy-node.sh uninstall --purge    # 连配置与数据一起删掉
+```
+
+> **单机测试环境必须先声明**。一台机器上跑多个实例时，内存要按实例数分摊、端口也要避开
+> 6379/26379，所以必须显式加 `--single-host`（或用 `single` 子命令），否则脚本按「一机一实例」
+> 的生产假设调优：
+>
+> ```bash
+> sudo ./deploy-node.sh master --single-host --port 16379 --password 'p'
+> sudo ./deploy-node.sh replica --single-host --port 16380 --master-port 16379 --password 'p'
+> sudo ./deploy-node.sh sentinel --single-host --port 26379 --master-port 16379 --password 'p'
+> sudo ./deploy-node.sh single --password 'p'    # 一条命令拉起 1 主 2 从 3 哨兵
+> ```
+
+**注意**：`--password` 是必填项。哨兵自己也会带上这个密码——否则 `protected-mode` 会拒掉
+来自其它哨兵的（非 loopback）连接，三台哨兵互相不可见就永远凑不齐 quorum，主库挂了也不会切换。
+
 ### 推荐布局（3 台起步，每台 1 Redis + 1 Sentinel）
 
 ```
@@ -459,7 +515,10 @@ requirepass <sentinel-pass>   # 只保护哨兵自身的 SENTINEL 命令，可�
   Sentinel 模式）通过 `SENTINEL get-master-addr-by-name` 发现当前主库；或者在前置 VIP /
   HAProxy 上做健康检查转发。
 
-### 分步部署（以 3 台为例：1 主 + 2 从 + 3 哨兵）
+### 手工部署（不想用脚本时照做即可，以 3 台为例：1 主 + 2 从 + 3 哨兵）
+
+> 上面 `deploy-node.sh` 做的就是这里列的事情：生成配置、写 systemd 单元、启动并验证。
+> 想自己掌控每一步（或用 Ansible 之类的配置管理）时按本节手工操作。
 
 约定（按自己环境替换 IP / 密码）：
 
@@ -629,9 +688,12 @@ const client = new Redis({
 | 场景 | 用什么 |
 |---|---|
 | 编译产物、装包、单机冒烟 | `install.sh` |
-| 单机拉起 1 主 2 从 3 哨兵，验证二进制与切换流程 | `deploy-sentinel.sh` |
-| 生产多机拓扑 | 按本节分步操作 + 你现有的配置管理（Ansible / Salt / 手工），脚本不负责多机分发 |
+| **多机分角色部署（生产推荐）** | `deploy-node.sh master / replica / sentinel`（配置自动生成 + systemd 托管） |
+| 单机拉起 1 主 2 从 3 哨兵，验证二进制与切换流程 | `deploy-sentinel.sh`（或 `deploy-node.sh single`） |
+| 自定义拓扑 / 接入现有配置管理 | 按本节手工配置，脚本不负责多机分发 |
 
+`deploy-node.sh` 在测试机上跑通过完整流程：三台角色部署 → 哨兵互相发现 → 停掉主库后
+`+odown` → `+switch-master` 切到从库 → 原主库自动降级为从库并重新同步。
 `deploy-sentinel.sh` 模拟不了跨机器网络分区、时钟偏差、整机断电这类故障——这些只能在多机环境验证。
 
 ## 升级流程（线上操作参考）
@@ -955,6 +1017,32 @@ each keep their own tag and assets; the rolling `latest` only carries the curren
 replicates, elects and fails over correctly. It is **not** a production topology: three sentinels on
 one machine share a kernel, a NIC and a power supply, so a host failure takes all of them down and
 quorum buys you nothing.
+
+**Lazy mode — one command per role.** `deploy-node.sh` generates `redis.conf` / `sentinel.conf` /
+systemd units from the current environment (memory → `maxmemory`, cores → `io-threads`, detected IP →
+`replica-announce-ip`, plus THP / `overcommit_memory` / fd-limit checks). Only role + password + port
+are required:
+
+```bash
+# on host A (master)
+sudo ./deploy-node.sh master --password 'YourPass' --port 6379
+#   it prints the exact commands for the other hosts, IP already filled in
+
+# on hosts B and C (replicas)
+sudo ./deploy-node.sh replica --master-host <A-ip> --password 'YourPass'
+
+# on A, B and C (sentinels)
+sudo ./deploy-node.sh sentinel --master-host <A-ip> --password 'YourPass' --quorum 2
+
+# day-2 operations
+sudo ./deploy-node.sh status
+sudo ./deploy-node.sh uninstall [--purge]
+```
+
+Single-box test layouts must declare themselves with `--single-host` (or the `single` subcommand) so
+memory is split across instances and ports avoid 6379/26379. `--password` is mandatory: sentinels carry
+it too, otherwise `protected-mode` rejects the sentinels' own non-loopback peer connections and quorum
+can never be reached.
 
 **Recommended: three machines, each running 1 Redis + 1 Sentinel** (or 3 data hosts + 3 separate
 sentinel hosts). Use an odd number of sentinels, quorum = majority:
