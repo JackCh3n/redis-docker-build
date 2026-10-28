@@ -19,7 +19,7 @@ Thanks for taking the time to contribute! 🎉
 4. **Test the build locally** if you have Docker:
    ```bash
    ./build.sh image
-   ./build.sh build 7.2.16
+   ./build.sh build 7.2.17
    ```
 5. **Commit** with a clear message and open a **Pull Request**.
 
@@ -29,8 +29,8 @@ This repo keeps **one branch per Redis major line** (their build systems diverge
 
 | Branch | Redis line | Default version | License | Rolling release |
 |---|---|---|---|---|
-| `main` | 8.x | `8.10.1` | RSALv2 / SSPLv1 / AGPLv3 | `latest` |
-| `7.x` | 7.x | `7.2.16` | BSD-3-Clause | `latest-7.x` |
+| `main` | 8.x | `8.10.3` | RSALv2 / SSPLv1 / AGPLv3 | `latest` |
+| `7.x` | 7.x | `7.2.17` | BSD-3-Clause | `latest-7.x` |
 
 - CI triggers are **branch-local**: each branch's `.cnb.yml` / workflow only listens to its own
   branch (`7.x` listens to `7.x`, `main` listens to `main`/`master`), so the two lines never
@@ -40,8 +40,8 @@ This repo keeps **one branch per Redis major line** (their build systems diverge
 - When bumping the default Redis version on a branch, update **all** of:
   `build.sh`, `.github/workflows/build.yml`, `.cnb.yml`, `README.md`.
 - Default version policy on the **`7.x` branch**: stay on the **last BSD-3-Clause release**
-  (`7.2.16`) unless there is a deliberate reason to move — many regulated environments cannot
-  accept RSALv2 / SSPLv1 / AGPLv3 terms. The 8.x line deliberately defaults to `8.10.1`.
+  (`7.2.17`) unless there is a deliberate reason to move — many regulated environments cannot
+  accept RSALv2 / SSPLv1 / AGPLv3 terms. The 8.x line deliberately defaults to `8.10.3`.
 
 ## License compliance (must keep)
 

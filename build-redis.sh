@@ -7,13 +7,13 @@
 #
 # 用法示例：
 #   docker run --rm -v /opt/redis-dist:/opt/dist redis-builder:7.6 \
-#     --redis-version 7.2.16
+#     --redis-version 7.2.17
 #
 #   docker run --rm -v /opt/redis-dist:/opt/dist redis-builder:7.6 \
-#     --redis-version 8.10.1 --malloc jemalloc --tls yes --smoke yes
+#     --redis-version 8.10.3 --malloc jemalloc --tls yes --smoke yes
 #
 # 参数（均可换成同名环境变量，命令行优先级更高）：
-#   --redis-version  Redis 版本号            (默认 7.2.16)
+#   --redis-version  Redis 版本号            (默认 7.2.17)
 #   --prefix         安装前缀 make install PREFIX= (默认 /usr/local)
 #   --output         产物输出目录            (默认 /opt/dist)
 #   --malloc         内存分配器 auto|jemalloc|libc (默认 auto)
@@ -39,7 +39,7 @@
 # =============================================================
 set -euo pipefail
 
-REDIS_VERSION="${REDIS_VERSION:-7.2.16}"
+REDIS_VERSION="${REDIS_VERSION:-7.2.17}"
 PREFIX="${REDIS_PREFIX:-/usr/local}"
 OUTPUT="${OUTPUT_DIR:-/opt/dist}"
 MALLOC="${REDIS_MALLOC:-auto}"
