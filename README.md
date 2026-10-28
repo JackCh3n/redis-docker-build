@@ -341,8 +341,105 @@ sudo ./deploy-sentinel.sh --cleanup
 与 `--ports` 一致、切换后新主库可写且数据不丢、旧主库降级并从库重连新主库（等收敛后再打印拓扑表）。
 任一项失败都会打印对应实例的日志尾部并退出非 0。启用密码认证加 `--password <pass>`。
 
-> 这是**测试用**拓扑：全部实例监听 `127.0.0.1`、关闭 RDB/AOF。生产哨兵请按官方文档
-> 把 3 个哨兵分散到不同机器，并保持 `sentinel monitor` 的 quorum 为多数派。
+> 这是**测试用**拓扑：全部实例监听 `127.0.0.1`、关闭 RDB/AOF，只验证二进制与切换流程本身。
+> 生产环境必须把数据节点与哨兵分散到多台机器，见下一节。
+
+## 生产哨兵拓扑（多机部署）
+
+`deploy-sentinel.sh` 把 6 个实例塞在一台机器上，用端口区分——它能证明「这个二进制复制、选主、
+切换都正常」，但**不能**当作生产拓扑。单机上 3 个哨兵共享同一个内核、同一块网卡、同一个电源：
+进程级故障能扛，机器级故障直接全灭，quorum 也就失去意义。
+
+### 推荐布局（3 台起步，每台 1 Redis + 1 Sentinel）
+
+```
+                客户端（用哨兵发现主库，不直连 IP）
+                            │
+        ┌───────────────────┼───────────────────┐
+        ▼                   ▼                   ▼
+  ┌───────────┐       ┌───────────┐       ┌───────────┐
+  │  node-a   │       │  node-b   │       │  node-c   │
+  │ redis 6379│◀─────▶│ redis 6379│◀─────▶│ redis 6379│
+  │  master   │  复制  │  replica  │  复制  │  replica  │
+  │ sentinel  │◀─────▶│ sentinel  │◀─────▶│ sentinel  │
+  │   26379   │  互探  │   26379   │  互探  │   26379   │
+  └───────────┘       └───────────┘       └───────────┘
+```
+
+- `sentinel monitor mymaster <node-a> 6379 2`：quorum=2，任意一台宕机后剩下两台仍能授权选主；
+  只有两台同时失联才会停止自动切换（这正是防止脑裂的设计）。
+- 哨兵总数取**奇数**（3 或 5），quorum 取多数派；哨兵之间必须两两可达（26379 要放通）。
+- 不要把哨兵和数据节点堆在同一批机器上：理想情况是 3 台机器各跑 1 Redis + 1 Sentinel（故障域均衡），
+  或数据 3 台 + 哨兵 3 台分开。
+
+### 各节点配置要点
+
+主库 `node-a` 的 `redis.conf`：
+
+```conf
+bind 10.0.0.11              # 内网地址；多网卡时绑定内网那张
+port 6379
+protected-mode yes
+requirepass <pass>
+masterauth <pass>           # 自己变成从库后，用它连新主库
+appendonly yes
+dir /var/lib/redis
+logfile /var/log/redis/redis.log
+```
+
+从库 `node-b` / `node-c` 在此基础上只多一行：
+
+```conf
+replicaof 10.0.0.11 6379
+```
+
+三个哨兵的 `sentinel.conf` 内容相同（只有自身端口 / 路径不同）：
+
+```conf
+port 26379
+bind 0.0.0.0
+daemonize yes
+dir /var/lib/redis-sentinel
+logfile /var/log/redis/sentinel.log
+sentinel monitor mymaster 10.0.0.11 6379 2
+sentinel auth-pass mymaster <pass>
+sentinel down-after-milliseconds mymaster 5000
+sentinel failover-timeout mymaster 60000
+sentinel parallel-syncs mymaster 1
+requirepass <sentinel-pass>   # 只保护哨兵自身的 SENTINEL 命令，可与 Redis 密码不同
+```
+
+几个必须注意的点：
+
+- `masterauth` 不能省。切换后老主库会被哨兵改成新主库的从库，没有它同步会一直失败。
+- `sentinel monitor` 里写的地址必须是**其它哨兵也访问得到**的地址；NAT / 容器 / 云主机
+  场景用 `sentinel announce-ip <ip>`、`sentinel announce-port <port>` 显式声明对外地址。
+- 哨兵会**重写自己的配置文件**（记录 epoch、已知哨兵、已知从库），所以文件必须可写，
+  不要放进只读挂载或配置管理工具的「每次强制覆盖」流程里。
+- 客户端**不要写死主库 IP**：用支持哨兵的客户端（Jedis / Lettuce / ioredis / redis-py 的
+  Sentinel 模式）通过 `SENTINEL get-master-addr-by-name` 发现当前主库；或者在前置 VIP /
+  HAProxy 上做健康检查转发。
+
+### 上线顺序与验收
+
+1. 起主库 → `redis-cli -h 10.0.0.11 -a '<pass>' ping` 返回 PONG。
+2. 起两个从库 → `info replication` 里 `master_link_status:up`，主库 `connected_slaves:2`。
+3. 最后起 3 个哨兵（错开几秒，避免同时进入选举）：
+   `sentinel master mymaster` 应看到 `num-slaves 2`、`flags master`；
+   `sentinel sentinels mymaster` 应能看到另外两个哨兵。
+4. 验收切换：`sentinel failover mymaster`（或直接停主库进程），确认新主被选出、
+   原主库降级为从库并完成同步。
+
+### 与脚本的分工
+
+| 场景 | 用什么 |
+|---|---|
+| 编译产物、装包、单机冒烟 | `install.sh` |
+| 单机拉起 1 主 2 从 3 哨兵，验证二进制与切换流程 | `deploy-sentinel.sh` |
+| 生产多机拓扑 | 按本节配置 + 你现有的配置管理（Ansible / Salt / 手工），脚本不负责多机分发 |
+
+`deploy-sentinel.sh` 模拟不了跨机器网络分区、时钟偏差、整机断电这类故障——这些只能在多机环境验证。
+
 
 ## 升级流程（线上操作参考）
 
@@ -633,6 +730,47 @@ Native builds link the host's own OpenSSL/systemd and are the safest path for TL
 | push to `7.x` | default version (both arches) | `latest-7.x` (rolling) |
 | tag `vRedis-x.y.z` | that version only | tag-named release (frozen) |
 | manual dispatch | any version/allocator/arch | `vRedis-{version}` |
+
+## Production Sentinel topology (multi-host)
+
+`deploy-sentinel.sh` runs six instances on one box (separated by port) to prove that *this binary*
+replicates, elects and fails over correctly. It is **not** a production topology: three sentinels on
+one machine share a kernel, a NIC and a power supply, so a host failure takes all of them down and
+quorum buys you nothing.
+
+**Recommended: three machines, each running 1 Redis + 1 Sentinel** (or 3 data hosts + 3 separate
+sentinel hosts). Use an odd number of sentinels, quorum = majority:
+
+```conf
+# redis.conf on node-a (master)
+bind 10.0.0.11
+requirepass <pass>
+masterauth <pass>          # required: after a failover the old master is demoted to replica
+
+# redis.conf on node-b / node-c (replicas)
+replicaof 10.0.0.11 6379
+
+# sentinel.conf on all three (identical except port/paths)
+sentinel monitor mymaster 10.0.0.11 6379 2
+sentinel auth-pass mymaster <pass>
+sentinel down-after-milliseconds mymaster 5000
+sentinel failover-timeout mymaster 60000
+sentinel parallel-syncs mymaster 1
+```
+
+Notes that bite in practice:
+
+- The address in `sentinel monitor` must be reachable **from every other sentinel**; behind NAT or
+  containers declare the public address with `sentinel announce-ip` / `sentinel announce-port`.
+- Sentinels **rewrite their own config file** (epochs, known sentinels/replicas): keep the file
+  writable and don't let a config-management tool overwrite it on every run.
+- Clients must not hard-code the master IP — use a Sentinel-aware client
+  (`SENTINEL get-master-addr-by-name`) or a VIP/HAProxy in front.
+- Bring-up order: master → replicas (`master_link_status:up`) → sentinels; verify with
+  `sentinel master mymaster` (`num-slaves`, `flags`) and `sentinel sentinels mymaster`.
+
+The script cannot emulate cross-host partitions, clock skew or whole-machine loss; those must be
+tested on the real multi-host layout.
 
 ## Upgrade procedure
 
