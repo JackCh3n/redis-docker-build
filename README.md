@@ -141,6 +141,7 @@ Redis 7.4 变更了许可，8.0 起又**加回** AGPLv3 选项。按版本区间
 ├── build.sh                       # 宿主机一键构建入口（本地有 Docker 时）
 ├── build-native.sh                # 目标机原生编译（麒麟/信创，无需 Docker）
 ├── install.sh                     # 一键安装/更新脚本（纯离线，随产物包分发）
+├── deploy-sentinel.sh             # 单机哨兵拓扑部署与故障切换验证（测试用）
 ├── .github/workflows/build.yml    # GitHub Actions 流水线（x86_64 + aarch64）
 ├── .cnb.yml                       # CNB (cnb.cool) 流水线（x86_64 + aarch64 双架构）
 ├── assets/
@@ -338,6 +339,31 @@ systemd 单元 → `/etc/systemd/system/redis.service`（自动 `enable`）、�
 `--check`、`--no-systemd`、`--no-config`、`--uninstall`（完整说明见 `./install.sh --help`）。
 
 > 未解压时也可直接安装：`sudo ./install.sh --from redis-8.10.3-aarch64.tar.gz`
+
+## 哨兵模式测试部署（一台机器验证 1 主 2 从 3 哨兵）
+
+`deploy-sentinel.sh` 用产物包在一台机器上拉起完整哨兵拓扑，并自动验证「复制 → 哨兵发现 →
+主从切换」，适合升级前在测试机上确认二进制可用、故障切换正常。端口刻意避开默认值
+（主库 16379 / 从库 16380、16381 / 哨兵 26379~26381），不会与机器上已有 Redis 冲突。
+
+```bash
+# 部署 + 完整验证（含一次 SENTINEL FAILOVER）
+sudo ./deploy-sentinel.sh --pkg redis-8.10.3-x86_64.tar.gz
+
+# 只验证拓扑与复制，不做切换
+sudo ./deploy-sentinel.sh --pkg ./redis-8.10.3-x86_64 --no-failover
+
+# 查看当前拓扑 / 清理
+./deploy-sentinel.sh --status
+sudo ./deploy-sentinel.sh --cleanup
+```
+
+脚本依次检查：从库 `master_link_status:up`、从库拒绝写入（`READONLY`）、哨兵看到 2 个从库、
+切换后新主库可写且数据不丢。任一项失败都会打印对应实例的日志尾部并退出非 0。
+启用密码认证加 `--password <pass>`，哨兵侧会自动配置 `auth-pass`。
+
+> 这是**测试用**拓扑：全部实例监听 `127.0.0.1`、关闭 RDB/AOF。生产哨兵请按官方文档
+> 把 3 个哨兵分散到不同机器，并保持 `sentinel monitor` 的 quorum 为多数派。
 
 ## 升级流程（线上操作参考）
 
