@@ -343,23 +343,35 @@ systemd 单元 → `/etc/systemd/system/redis.service`（自动 `enable`）、�
 ## 哨兵模式测试部署（一台机器验证 1 主 2 从 3 哨兵）
 
 `deploy-sentinel.sh` 用产物包在一台机器上拉起完整哨兵拓扑，并自动验证「复制 → 哨兵发现 →
-主从切换」，适合升级前在测试机上确认二进制可用、故障切换正常。端口刻意避开默认值
-（主库 16379 / 从库 16380、16381 / 哨兵 26379~26381），不会与机器上已有 Redis 冲突。
+主从切换」，适合升级前在测试机上确认二进制可用、故障切换正常。默认端口刻意避开标准值
+（数据 `16379,16380,16381`，哨兵 `26379,26380,26381`），不会与机器上已有 Redis 冲突；
+端口和实例数量都可以用 `--ports` / `--sentinel-ports` 改。
 
 ```bash
-# 部署 + 完整验证（含一次 SENTINEL FAILOVER）
+# 部署 + 完整验证（含一次 SENTINEL FAILOVER），端口用默认值
 sudo ./deploy-sentinel.sh --pkg redis-8.10.3-x86_64.tar.gz
+
+# 自定义端口：第一个是主库，其余是从库；逗号或空格分隔都可以
+sudo ./deploy-sentinel.sh --pkg redis-8.10.3-x86_64.tar.gz \
+  --ports 16379,16380,16381 --sentinel-ports 26379,26380,26381
+
+# 只要 1 主 1 从 1 哨兵（quorum 自动取多数派，这里为 1）
+sudo ./deploy-sentinel.sh --pkg redis-8.10.3-x86_64.tar.gz \
+  --ports 16379,16380 --sentinel-ports 26379
 
 # 只验证拓扑与复制，不做切换
 sudo ./deploy-sentinel.sh --pkg ./redis-8.10.3-x86_64 --no-failover
 
-# 查看当前拓扑 / 清理
+# 查看当前拓扑 / 清理（端口自动沿用部署时记录在 basedir/topology.conf 的值）
 ./deploy-sentinel.sh --status
 sudo ./deploy-sentinel.sh --cleanup
 ```
 
-脚本依次检查：从库 `master_link_status:up`、从库拒绝写入（`READONLY`）、哨兵看到 2 个从库、
-切换后新主库可写且数据不丢、旧主库降级并从库重连新主库（等收敛后再打印拓扑表）。
+部署时会把选定的端口写进 `<basedir>/topology.conf`，所以 `--status` / `--cleanup` 不带
+`--ports` 也能对上自定义拓扑；想换端口重新部署时显式传新值即可。
+
+脚本依次检查：从库 `master_link_status:up`、从库拒绝写入（`READONLY`）、哨兵看到的从库数量
+与 `--ports` 一致、切换后新主库可写且数据不丢、旧主库降级并从库重连新主库（等收敛后再打印拓扑表）。
 任一项失败都会打印对应实例的日志尾部并退出非 0。
 启用密码认证加 `--password <pass>`，哨兵侧会自动配置 `auth-pass`。
 

@@ -3,36 +3,43 @@
 # deploy-sentinel.sh — 单机部署 Redis Sentinel 拓扑（测试用）
 #
 # 用途：用 build-redis.sh 产出的二进制包，在**一台机器**上拉起一套
-#       1 主 + 2 从 + 3 哨兵的完整拓扑，并自动验证：复制、哨兵发现、
-#       主从切换（failover）。
+#       1 主 + N 从 + M 哨兵的拓扑（默认 1 主 2 从 3 哨兵），并自动验证：
+#       复制、哨兵发现、主从切换（failover）。端口与实例数量均可通过
+#       --ports / --sentinel-ports 指定。
 #
-# 端口刻意避开默认值，避免与机器上已有的 Redis 冲突：
-#   主库         16379
-#   从库 x2      16380 / 16381
-#   哨兵 x3      26379 / 26380 / 26381
+# 端口可自定义，默认刻意避开标准端口（6379/26379），避免与机器上已有的 Redis 冲突：
+#   数据端口     16379 / 16380 / 16381   （第一个是主库，其余是从库）
+#   哨兵端口     26379 / 26380 / 26381   （quorum 自动取多数派）
 #
 # 用法：
-#   # 1) 用产物包部署并完整验证（含一次故障切换）
+#   # 1) 用产物包部署并完整验证（含一次故障切换），端口用默认值
 #   sudo ./deploy-sentinel.sh --pkg redis-8.10.3-x86_64.tar.gz
 #
 #   # 2) 用已解压的产物目录
 #   sudo ./deploy-sentinel.sh --pkg ./redis-8.10.3-x86_64
 #
-#   # 3) 只看当前状态（不部署）
+#   # 3) 自定义端口（逗号或空格分隔；第一个是主库，其余是从库）
+#   sudo ./deploy-sentinel.sh --pkg redis-8.10.3-x86_64.tar.gz \
+#     --ports 16379,16380,16381 --sentinel-ports 26379,26380,26381
+#
+#   # 4) 只看当前状态（不部署）
 #   ./deploy-sentinel.sh --status
 #
-#   # 4) 销毁整套拓扑并清理数据
+#   # 5) 销毁整套拓扑并清理数据
 #   sudo ./deploy-sentinel.sh --cleanup
 #
 # 参数：
-#   --pkg <tar.gz|dir>  产物包或已解压目录（部署模式必填）
-#   --basedir <dir>     部署根目录（默认 /opt/redis-sentinel-test）
-#   --password <pass>   启用 requirepass（哨兵侧自动配置 auth-pass）
-#   --master-port <n>   主库端口（默认 16379）
-#   --no-failover       只验证拓扑与复制，不做主从切换
-#   --keep-data         清理时保留 basedir（只停进程）
-#   --status            打印各实例角色与哨兵视图
-#   --cleanup           停止全部实例（可选删除数据）
+#   --pkg <tar.gz|dir>       产物包或已解压目录（部署模式必填）
+#   --basedir <dir>          部署根目录（默认 /opt/redis-sentinel-test）
+#   --password <pass>        启用 requirepass（哨兵侧自动配置 auth-pass）
+#   --ports <p1[,p2,p3]>     数据端口，第一个是主库（默认 16379,16380,16381）
+#                            至少两个：1 主 + N 从；数量可与默认不同
+#   --sentinel-ports <p...>  哨兵端口（默认 26379,26380,26381）
+#                            至少一个；quorum 自动取多数派（3 个 -> 2）
+#   --no-failover            只验证拓扑与复制，不做主从切换
+#   --keep-data              清理时保留 basedir（只停进程）
+#   --status                 打印各实例角色与哨兵视图
+#   --cleanup                停止全部实例（可选删除数据）
 #
 # 说明：
 #   * 纯离线：不联网，只依赖产物包内的二进制。
@@ -46,30 +53,86 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASEDIR="/opt/redis-sentinel-test"
 PKG=""
 PASSWORD=""
-MASTER_PORT=16379
+DATA_PORTS_RAW="16379,16380,16381"
+SENTINEL_PORTS_RAW="26379,26380,26381"
 DO_FAILOVER=yes
 KEEP_DATA=no
 MODE="deploy"
-
-REPLICA_PORTS="16380 16381"
-SENTINEL_PORTS="26379 26380 26381"
-SENTINEL_QUORUM=2
+PORTS_GIVEN=no
 MASTER_NAME="mymaster"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --pkg)         PKG="$2"; shift 2 ;;
-    --basedir)     BASEDIR="$2"; shift 2 ;;
-    --password)    PASSWORD="$2"; shift 2 ;;
-    --master-port) MASTER_PORT="$2"; shift 2 ;;
-    --no-failover) DO_FAILOVER=no; shift ;;
-    --keep-data)   KEEP_DATA=yes; shift ;;
-    --status)      MODE="status"; shift ;;
-    --cleanup)     MODE="cleanup"; shift ;;
-    -h|--help)     sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --pkg)            PKG="$2"; shift 2 ;;
+    --basedir)        BASEDIR="$2"; shift 2 ;;
+    --password)       PASSWORD="$2"; shift 2 ;;
+    --ports|--sentinel-ports)
+      # 允许 `--ports 16379,16380,16381`、`--ports "16379 16380 16381"`，
+      # 也允许不加引号的 `--ports 16379 16380 16381`（贪婪吞并后续非选项参数）。
+      _opt="$1"; shift
+      _vals=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          -*) break ;;
+          *)  _vals="${_vals}${_vals:+,}$1"; shift ;;
+        esac
+      done
+      [ -n "$_vals" ] || { echo "[ERROR] ${_opt} 缺少端口值" >&2; exit 1; }
+      if [ "$_opt" = "--ports" ]; then DATA_PORTS_RAW="$_vals"; else SENTINEL_PORTS_RAW="$_vals"; fi
+      PORTS_GIVEN=yes
+      ;;
+    --no-failover)    DO_FAILOVER=no; shift ;;
+    --keep-data)      KEEP_DATA=yes; shift ;;
+    --status)         MODE="status"; shift ;;
+    --cleanup)        MODE="cleanup"; shift ;;
+    -h|--help)        sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "[ERROR] 未知参数: $1" >&2; exit 1 ;;
   esac
 done
+
+# 部署时把端口记在 basedir 里；后续 --status / --cleanup 没显式给端口时沿用它，
+# 否则自定义端口部署完、再用默认端口查状态，看到的是另一套空拓扑。
+TOPOLOGY_FILE="${BASEDIR}/topology.conf"
+if [ "$PORTS_GIVEN" = "no" ] && [ -f "$TOPOLOGY_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$TOPOLOGY_FILE"
+  [ -n "${DATA_PORTS_RAW:-}" ] || DATA_PORTS_RAW="16379,16380,16381"
+  [ -n "${SENTINEL_PORTS_RAW:-}" ] || SENTINEL_PORTS_RAW="26379,26380,26381"
+fi
+
+# ---------- 端口解析与校验 ----------
+# 同时接受逗号和空格分隔，便于 `--ports 1,2,3` 与 `--ports "1 2 3"` 两种写法
+normalize_ports() { printf '%s' "$1" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//; s/ *$//'; }
+
+ALL_DATA_PORTS="$(normalize_ports "$DATA_PORTS_RAW")"
+SENTINEL_PORTS="$(normalize_ports "$SENTINEL_PORTS_RAW")"
+MASTER_PORT="$(printf '%s' "$ALL_DATA_PORTS" | awk '{print $1}')"
+REPLICA_PORTS="$(printf '%s' "$ALL_DATA_PORTS" | awk '{$1=""; sub(/^ /,""); print}')"
+SENTINEL_COUNT="$(printf '%s' "$SENTINEL_PORTS" | wc -w | tr -d ' ')"
+REPLICA_COUNT="$(printf '%s' "$REPLICA_PORTS" | wc -w | tr -d ' ')"
+SENTINEL_QUORUM=$(( SENTINEL_COUNT / 2 + 1 ))
+
+validate_ports() {
+  local p n=0 seen=" "
+  for p in $ALL_DATA_PORTS $SENTINEL_PORTS; do
+    case "$p" in
+      ''|*[!0-9]*) echo "[ERROR] 非法端口: '${p}'（必须是数字）" >&2; exit 1 ;;
+    esac
+    [ "$p" -ge 1 ] && [ "$p" -le 65535 ] || { echo "[ERROR] 端口越界: ${p}" >&2; exit 1; }
+    case "$seen" in
+      *" $p "*) echo "[ERROR] 端口重复: ${p}（数据端口与哨兵端口不能相同）" >&2; exit 1 ;;
+    esac
+    seen="${seen}${p} "
+    n=$((n + 1))
+  done
+
+  [ -n "$MASTER_PORT" ] || { echo "[ERROR] --ports 不能为空" >&2; exit 1; }
+  [ -n "$REPLICA_PORTS" ] || {
+    echo "[ERROR] --ports 至少需要两个端口（第一个主库，其余从库）" >&2; exit 1; }
+  [ "$SENTINEL_COUNT" -ge 1 ] || { echo "[ERROR] --sentinel-ports 不能为空" >&2; exit 1; }
+}
+
+validate_ports
 
 BIN_DIR="${BASEDIR}/bin"
 CONF_DIR="${BASEDIR}/conf"
@@ -235,7 +298,13 @@ do_deploy() {
   [ -n "$PKG" ] || { echo "[ERROR] 部署模式需要 --pkg <tar.gz|dir>" >&2; exit 1; }
 
   info "部署根目录：${BASEDIR}"
-  mkdir -p "$BIN_DIR" "$CONF_DIR" "$DATA_DIR" "$LOG_DIR" "${BASEDIR}/run"
+  mkdir -p "$BIN_DIR" "$CONF_DIR" "$DATA_DIR" "$LOG_DIR" "${BASEDIR}/run" 2>/dev/null ||
+    { echo "[ERROR] 无法创建部署目录 ${BASEDIR}（需要写权限，试加 sudo 或 --basedir 换路径）" >&2; exit 1; }
+
+  info "拓扑：主库 ${MASTER_PORT}｜从库 ${REPLICA_PORTS}｜哨兵 ${SENTINEL_PORTS}（quorum ${SENTINEL_QUORUM}）"
+  # 记录端口，供后续 --status / --cleanup 沿用（见脚本开头的 TOPOLOGY_FILE 逻辑）
+  printf "DATA_PORTS_RAW='%s'\nSENTINEL_PORTS_RAW='%s'\n" \
+    "$ALL_DATA_PORTS" "$SENTINEL_PORTS" > "$TOPOLOGY_FILE"
 
   local src
   src="$(find_binaries "$PKG")" || { echo "[ERROR] 未在 ${PKG} 中找到 redis-server" >&2; exit 1; }
@@ -319,10 +388,10 @@ do_deploy() {
   info "等待哨兵识别主从拓扑"
   local s="$SENTINEL_PORTS"
   s="${s%% *}"
-  if wait_until 40 sentinel_slave_count_is "$s" 2; then
-    ok "哨兵已识别 2 个从库"
+  if wait_until 40 sentinel_slave_count_is "$s" "$REPLICA_COUNT"; then
+    ok "哨兵已识别 ${REPLICA_COUNT} 个从库"
   else
-    bad "哨兵未在 40s 内识别到 2 个从库"
+    bad "哨兵未在 40s 内识别到 ${REPLICA_COUNT} 个从库"
     tail -n 20 "${LOG_DIR}/sentinel-${s}.log" | sed 's/^/      /' || true
     exit 1
   fi
@@ -357,7 +426,7 @@ do_deploy() {
   echo "      master-addr : ${addr}"
   echo "      replicas    : ${slaves}"
   echo "      master flags: ${flags}"
-  [ "$slaves" = "2" ] && ok "哨兵看到 2 个从库" || bad "哨兵看到的从库数不是 2"
+  [ "$slaves" = "$REPLICA_COUNT" ] && ok "哨兵看到 ${REPLICA_COUNT} 个从库" || bad "哨兵看到的从库数不是 ${REPLICA_COUNT}"
 
   if [ "$DO_FAILOVER" = "yes" ]; then
     info "验证 4/N：主动故障切换（SENTINEL FAILOVER）"
