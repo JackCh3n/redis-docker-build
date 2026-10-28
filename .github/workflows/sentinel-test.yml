@@ -17,13 +17,13 @@ on:
   workflow_dispatch:
     inputs:
       redis-version:
-        description: "Redis 版本（须已存在于该 Release 中，如 8.10.3）"
+        description: "Redis 版本（须已存在于该 Release 中，如 7.2.17）"
         required: true
-        default: "8.10.3"
+        default: "7.2.17"
       release-tag:
         description: "从哪个 Release 取产物（默认 latest）"
         required: false
-        default: "latest"
+        default: "latest-7.x"
       arch:
         description: "产物架构 x86_64|aarch64（aarch64 需要 ARM runner）"
         required: false

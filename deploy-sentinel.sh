@@ -80,7 +80,9 @@ REDIS_CLI="${BIN_DIR}/redis-cli"
 
 ok()   { printf '  \033[32m✔\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[31m✘\033[0m %s\n' "$*"; }
-info() { printf '>>> %s\n' "$*"; }
+# 提示信息写 stderr：本脚本有 `src="$(find_binaries ...)"` 这类命令替换，
+# 若日志走 stdout 会被一起捕获进返回值，导致路径变成「提示 + 路径」而 cp 失败。
+info() { printf '>>> %s\n' "$*" >&2; }
 
 # 相对 REPLICA_PORTS 生成的端口列表（主库优先）
 ALL_DATA_PORTS="${MASTER_PORT} ${REPLICA_PORTS}"
@@ -222,6 +224,12 @@ master_changed_from() {
   [ "$cur" != "$2" ]
 }
 
+# 该实例是否已作为从库跟上主库（role=slave 且 link=up）
+node_follows_master() {
+  [ "$(field "$1" replication role)" = "slave" ] &&
+  [ "$(field "$1" replication master_link_status)" = "up" ]
+}
+
 # ---------------- 部署 ----------------
 do_deploy() {
   [ -n "$PKG" ] || { echo "[ERROR] 部署模式需要 --pkg <tar.gz|dir>" >&2; exit 1; }
@@ -245,7 +253,11 @@ do_deploy() {
 
   # 复制二进制（保留软链：redis-sentinel / redis-check-* -> redis-server）
   info "安装二进制到 ${BIN_DIR}"
-  cp -a "${src}"/redis-* "$BIN_DIR"/ 2>/dev/null || true
+  cp -a "${src}"/redis-* "$BIN_DIR"/ || {
+    echo "[ERROR] 从 ${src} 复制二进制失败" >&2
+    ls -l "$src" | head -n 20 >&2 || true
+    exit 1
+  }
   cp -f "${src}"/install.sh "$BASEDIR"/ 2>/dev/null || true
   chmod 0755 "$BIN_DIR"/redis-server 2>/dev/null || true
   [ -x "$REDIS_SERVER" ] || { echo "[ERROR] redis-server 不可执行" >&2; exit 1; }
@@ -315,6 +327,11 @@ do_deploy() {
     exit 1
   fi
 
+  # 哨兵之间要先交换一轮 hello（默认每 10s 一次）才会在同一 epoch 下接受手动
+  # FAILOVER；刚启动就发命令会被静默丢弃（日志里连一条记录都没有）。等一轮再继续。
+  info "等待哨兵完成一轮 gossip（10s）"
+  sleep 12
+
   # ---------------- 验证 ----------------
   echo
   info "验证 1/N：读写与复制"
@@ -336,7 +353,7 @@ do_deploy() {
   local addr slaves flags
   addr="$(cli "$s" sentinel get-master-addr-by-name "$MASTER_NAME" | tr '\n' ' ')"
   slaves="$(cli "$s" sentinel replicas "$MASTER_NAME" | grep -c '^name$' || true)"
-  flags="$(cli "$s" sentinel master "$MASTER_NAME" | tr -d '\r' | awk 'NR%2==1 && $1=="flags"{print $2}' | head -n1)"
+  flags="$(cli "$s" sentinel master "$MASTER_NAME" | tr -d '\r' | paste - - | awk -F'\t' '$1=="flags"{print $2}' | head -n1)"
   echo "      master-addr : ${addr}"
   echo "      replicas    : ${slaves}"
   echo "      master flags: ${flags}"
@@ -344,15 +361,23 @@ do_deploy() {
 
   if [ "$DO_FAILOVER" = "yes" ]; then
     info "验证 4/N：主动故障切换（SENTINEL FAILOVER）"
-    local old_master new_master
+    local old_master new_master attempt
     old_master="$addr"
-    cli "$s" sentinel failover "$MASTER_NAME" >/dev/null
 
-    if wait_until 60 master_changed_from "$s" "$old_master"; then
+    # 重试三次：刚起的哨兵偶尔仍会把 FAILOVER 忽略掉，重发即可。
+    for attempt in 1 2 3; do
+      cli "$s" sentinel failover "$MASTER_NAME" >/dev/null 2>&1 || true
+      if wait_until 30 master_changed_from "$s" "$old_master"; then
+        break
+      fi
+      [ "$attempt" -lt 3 ] && bad "第 ${attempt} 次 FAILOVER 未生效，重试"
+    done
+
+    if master_changed_from "$s" "$old_master"; then
       new_master="$(cli "$s" sentinel get-master-addr-by-name "$MASTER_NAME" | tr '\n' ' ')"
       ok "哨兵已将主库切换：${old_master} -> ${new_master}"
     else
-      bad "60s 内未完成切换"
+      bad "90s 内未完成切换"
       tail -n 30 "${LOG_DIR}/sentinel-${s}.log" | sed 's/^/      /' || true
       exit 1
     fi
@@ -372,6 +397,20 @@ do_deploy() {
       bad "切换后数据丢失"
       exit 1
     fi
+
+    # 哨兵把旧主库降级、其余从库改指向新主库是异步的；不等收敛就打印状态表，
+    # 会看到「旧主库还是 master / 某从库 link=down」这种中间态。
+    info "等待拓扑收敛（旧主库降级、从库重连新主库）"
+    local p2
+    for p2 in $ALL_DATA_PORTS; do
+      [ "$p2" = "$new_port" ] && continue
+      if wait_until 40 node_follows_master "$p2"; then
+        ok "${p2} 已作为从库连上新主库 ${new_port}"
+      else
+        bad "${p2} 未在 40s 内完成重配置"
+        exit 1
+      fi
+    done
   fi
 
   echo
