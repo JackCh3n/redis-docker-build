@@ -1,0 +1,86 @@
+# =============================================================================
+# redis-docker-build · 哨兵部署回归测试（手动触发）
+#
+# 目的：拿已发布的产物包，在一台干净的 Linux 机器上真实跑一遍
+#       deploy-sentinel.sh —— 拉起 1 主 2 从 3 哨兵，验证复制、从库只读、
+#       哨兵视图，并做一次 SENTINEL FAILOVER。
+#
+# 说明：
+#   * 只在 workflow_dispatch 触发，不参与 push / tag 的发布流程。
+#   * runner 是 x86_64，故只测 x86_64 产物；aarch64 产物需在 ARM 机器上测。
+#   * 产物直接从 Release 下载（默认取滚动 Release `latest`），
+#     也可以用 release-tag 指定某个稳定版。
+# =============================================================================
+name: sentinel-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      redis-version:
+        description: "Redis 版本（须已存在于该 Release 中，如 8.10.3）"
+        required: true
+        default: "8.10.3"
+      release-tag:
+        description: "从哪个 Release 取产物（默认 latest）"
+        required: false
+        default: "latest"
+      arch:
+        description: "产物架构 x86_64|aarch64（aarch64 需要 ARM runner）"
+        required: false
+        default: "x86_64"
+
+permissions:
+  contents: read
+
+jobs:
+  sentinel:
+    runs-on: ${{ inputs.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载产物包
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          V="${{ inputs.redis-version }}"
+          T="${{ inputs.release-tag }}"
+          A="${{ inputs.arch }}"
+          PKG="redis-${V}-${A}.tar.gz"
+          echo ">>> 下载 ${T}/${PKG}"
+          gh release download "$T" --pattern "$PKG" --dir "$RUNNER_TEMP/pkg" --clobber
+          ls -lh "$RUNNER_TEMP/pkg/"
+          tar tzf "$RUNNER_TEMP/pkg/$PKG" | head -20
+
+      - name: 环境信息
+        run: |
+          set -e
+          uname -a
+          cat /etc/os-release | head -3
+          getconf PAGESIZE
+
+      - name: 部署哨兵拓扑并验证
+        run: |
+          set -e
+          chmod +x deploy-sentinel.sh
+          PKG="$RUNNER_TEMP/pkg/redis-${{ inputs.redis-version }}-${{ inputs.arch }}.tar.gz"
+          ./deploy-sentinel.sh --pkg "$PKG" --basedir "$RUNNER_TEMP/sentinel-test"
+
+      - name: 切换后再确认拓扑仍然健康
+        run: |
+          set -e
+          ./deploy-sentinel.sh --status --basedir "$RUNNER_TEMP/sentinel-test"
+
+      - name: 收集日志
+        if: always()
+        run: |
+          for f in "$RUNNER_TEMP"/sentinel-test/logs/*.log; do
+            [ -f "$f" ] || continue
+            echo "===== $(basename "$f") ====="
+            tail -n 15 "$f"
+          done
+
+      - name: 清理
+        if: always()
+        run: |
+          ./deploy-sentinel.sh --cleanup --basedir "$RUNNER_TEMP/sentinel-test" || true
