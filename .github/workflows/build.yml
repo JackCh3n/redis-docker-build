@@ -199,6 +199,7 @@ jobs:
           for d in dist/*/; do
             [ -d "$d" ] || continue
             sudo install -m 0755 install.sh "${d}install.sh"
+            sudo install -m 0755 deploy-sentinel.sh "${d}deploy-sentinel.sh"
             sudo install -m 0644 assets/redis.service "${d}redis.service"
             sudo install -m 0644 assets/redis.conf.example "${d}redis.conf"
             # 项目自身许可证（MIT）；上游 Redis 许可证由 build-redis.sh 生成 LICENSE.redis.txt
@@ -297,7 +298,7 @@ jobs:
           EOF
 
           publish() {
-            local tag="$1"
+            local tag="$1" title="$2" notes="$3"
             if gh release view "$tag" --json id -q .id >/dev/null 2>&1; then
               echo ">>> Release $tag 已存在，清理历史附件后重传"
 
@@ -320,19 +321,25 @@ jobs:
               done < <(gh api "repos/${GITHUB_REPOSITORY}/releases/${rid}/assets" --paginate -q '.[].id')
 
               for f in $FILES; do gh release upload "$tag" "$f" --clobber; done
-              gh release edit "$tag" --title "$TITLE" --notes-file notes.md --draft=false
+              gh release edit "$tag" --title "$title" --notes-file "$notes" --draft=false
               echo ">>> 现有附件："
               gh release view "$tag" --json assets -q '.assets[].name'
             else
               # shellcheck disable=SC2086
-              gh release create "$tag" $FILES --title "$TITLE" --notes-file notes.md --target "$GITHUB_SHA"
+              gh release create "$tag" $FILES --title "$title" --notes-file "$notes" --target "$GITHUB_SHA"
             fi
           }
 
+          # 每个版本都额外产出一个独立 Release（vRedis-x.y.z），
+          # 这样 8.10.3 / 8.10.1 / 7.2.16 各自一个标签，而不是全堆在滚动 latest 里。
+          VERSION_TAG="vRedis-${VERSION}"
+          sed "1s/.*/## Redis ${VERSION}/" notes.md > notes-version.md
+
           if [ "$SCENE" = "mainline" ]; then
-            publish "latest"
+            publish "latest" "$TITLE" notes.md
+            publish "$VERSION_TAG" "Redis ${VERSION}" notes-version.md
           else
-            publish "$RELEASE_TAG"
+            publish "$RELEASE_TAG" "$TITLE" notes.md
           fi
 
       - name: 汇总

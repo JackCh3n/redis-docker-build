@@ -119,8 +119,12 @@ license notices, so **every distributed tarball must carry the upstream license 
   returns 406). Do not introduce raw `\n` inside a JSON body — escape it (see `ensure-release`).
 - The GitHub release job requires `contents: write`; CNB needs `CNB_TOKEN` (already in the env).
 - The tarballs must stay **self-contained**: the packaging step copies `install.sh`,
-  `assets/redis.service` and `assets/redis.conf.example` into each `dist/<pkg>/` before `tar`.
-  If you add a new asset file, add it to all three packagers (`.cnb.yml`, `build.yml`, `build.sh`).
+  `deploy-sentinel.sh`, `assets/redis.service` and `assets/redis.conf.example` into each
+  `dist/<pkg>/` before `tar`. If you add a new asset file, add it to all three packagers
+  (`.cnb.yml`, `build.yml`, `build.sh`).
+- **Two releases per build.** Besides the rolling tag (`latest` / `latest-7.x`), every build also
+  creates or updates `vRedis-<version>`, so each Redis version keeps its own tag and assets.
+  The rolling release is pruned to the current version; the version release is refreshed in place.
 - Release titles must be **English**; notes use `--notes-file` (a plain `\n` passed to `--notes`
   is treated literally).
 - The in-container smoke test (start instance → `PING` → expect `PONG`) must pass; a failing

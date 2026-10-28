@@ -105,11 +105,14 @@
       echo "##[set-output TITLE=${TITLE}]"
       echo "##[set-output VERSION=${V}]"
       echo "##[set-output MK=${MK}]"
+      # 每个版本一个独立 Release（vRedis-x.y.z），与滚动 latest 并存
+      echo "##[set-output VTAG=vRedis-${V}]"
     exports:
       TAG: RELEASE_TAG
       TITLE: RELEASE_TITLE
       VERSION: RELEASE_VERSION
       MK: RELEASE_MAKE_LATEST
+      VTAG: VERSION_TAG
 
   # 编译（架构由流水线的 BASE_IMAGE 决定）
   - name: build-redis
@@ -138,6 +141,7 @@
       for d in dist/*/; do
         [ -d "$d" ] || continue
         install -m 0755 install.sh "${d}install.sh"
+        install -m 0755 deploy-sentinel.sh "${d}deploy-sentinel.sh"
         install -m 0644 assets/redis.service "${d}redis.service"
         install -m 0644 assets/redis.conf.example "${d}redis.conf"
         # 项目自身许可证（MIT）；上游 Redis 许可证由 build-redis.sh 生成 LICENSE.redis.txt
@@ -165,12 +169,11 @@
       cat RELEASE_NOTES.md
 
   # 幂等 + 并发安全地确保 Release 存在
+  # 会确保两个 Release：滚动标签（RELEASE_TAG）与版本标签（VERSION_TAG = vRedis-x.y.z）。
+  # 版本标签让 8.10.3 / 8.10.1 / 7.2.16 各自独立成 Release，不再全堆在 latest 里。
   - name: ensure-release
     script: |
       set -e
-      TAG="${RELEASE_TAG:?缺少 RELEASE_TAG}"
-      NAME="${RELEASE_TITLE:-$TAG}"
-      MK="${RELEASE_MAKE_LATEST:-false}"
       API="https://api.cnb.cool/${CNB_REPO_SLUG}/-/releases"
       H_AUTH="Authorization: Bearer ${CNB_TOKEN}"
       H_ACC="Accept: application/vnd.cnb.api+json"
@@ -187,55 +190,73 @@
 
       BODY=$(sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\n/\\n/g' RELEASE_NOTES.md)
 
-      echo ">>> 确保 Release 存在: ${TAG}（make_latest=${MK}）"
-      OK="no"
-      for attempt in 1 2 3 4 5; do
-        ID="$(rel_id "$TAG")"
-        if [ -n "$ID" ]; then
-          echo ">>> 已存在（id=${ID}），更新标题与描述"
-          HTTP=$(curl -s -o /dev/null -w "%{http_code}" -m 30 -X PATCH \
-            -H "$H_AUTH" -H "Content-Type: application/json" -H "$H_ACC" \
-            "${API}/${ID}" \
-            -d "{\"name\":\"${NAME}\",\"body\":\"${BODY}\",\"make_latest\":\"${MK}\"}") || HTTP="000"
-          echo ">>> PATCH 结果: HTTP ${HTTP}"
-          if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ]; then
-            OK="yes"
-          else
-            echo ">>> 警告：描述更新失败，但附件仍可上传，继续"
-            OK="yes"
+      ensure_one() {
+        local TAG="$1" NAME="$2" MK="$3"
+        local OK="no" attempt ID HTTP
+        echo ">>> 确保 Release 存在: ${TAG}（make_latest=${MK}）"
+        for attempt in 1 2 3 4 5; do
+          ID="$(rel_id "$TAG")"
+          if [ -n "$ID" ]; then
+            echo ">>> 已存在（id=${ID}），更新标题与描述"
+            HTTP=$(curl -s -o /dev/null -w "%{http_code}" -m 30 -X PATCH \
+              -H "$H_AUTH" -H "Content-Type: application/json" -H "$H_ACC" \
+              "${API}/${ID}" \
+              -d "{\"name\":\"${NAME}\",\"body\":\"${BODY}\",\"make_latest\":\"${MK}\"}") || HTTP="000"
+            echo ">>> PATCH 结果: HTTP ${HTTP}"
+            if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ]; then
+              OK="yes"
+            else
+              echo ">>> 警告：描述更新失败，但附件仍可上传，继续"
+              OK="yes"
+            fi
+            break
           fi
-          break
-        fi
 
-        echo ">>> 不存在，创建（第 ${attempt} 次尝试）"
-        HTTP=$(curl -s -o /tmp/rel.json -w "%{http_code}" -m 30 -X POST \
-          -H "$H_AUTH" -H "Content-Type: application/json" -H "$H_ACC" \
-          "${API}" \
-          -d "{\"tag_name\":\"${TAG}\",\"name\":\"${NAME}\",\"body\":\"${BODY}\",\"draft\":false,\"prerelease\":false,\"make_latest\":\"${MK}\",\"target_commitish\":\"${CNB_COMMIT:-main}\"}") || HTTP="000"
-        echo ">>> POST 结果: HTTP ${HTTP}"
-        case "$HTTP" in
-          200|201) OK="yes"; break ;;
-          409|422)
-            # 另一条架构流水线抢先创建了，视为成功
-            echo ">>> 并发创建冲突，视为已存在"
-            OK="yes"; break ;;
-        esac
-        head -c 300 /tmp/rel.json 2>/dev/null || true
-        echo
-        echo ">>> 第 ${attempt} 次失败，3s 后重试"
-        sleep 3
-      done
-      if [ "$OK" != "yes" ]; then
-        echo "!!! Release 创建失败（tag=${TAG}）"
-        exit 1
+          echo ">>> 不存在，创建（第 ${attempt} 次尝试）"
+          HTTP=$(curl -s -o /tmp/rel.json -w "%{http_code}" -m 30 -X POST \
+            -H "$H_AUTH" -H "Content-Type: application/json" -H "$H_ACC" \
+            "${API}" \
+            -d "{\"tag_name\":\"${TAG}\",\"name\":\"${NAME}\",\"body\":\"${BODY}\",\"draft\":false,\"prerelease\":false,\"make_latest\":\"${MK}\",\"target_commitish\":\"${CNB_COMMIT:-main}\"}") || HTTP="000"
+          echo ">>> POST 结果: HTTP ${HTTP}"
+          case "$HTTP" in
+            200|201) OK="yes"; break ;;
+            409|422)
+              # 另一条架构流水线抢先创建了，视为成功
+              echo ">>> 并发创建冲突，视为已存在"
+              OK="yes"; break ;;
+          esac
+          head -c 300 /tmp/rel.json 2>/dev/null || true
+          echo
+          echo ">>> 第 ${attempt} 次失败，3s 后重试"
+          sleep 3
+        done
+        if [ "$OK" != "yes" ]; then
+          echo "!!! Release 创建失败（tag=${TAG}）"
+          exit 1
+        fi
+        echo ">>> Release ${TAG} 就绪"
+      }
+
+      ensure_one "${RELEASE_TAG:?缺少 RELEASE_TAG}" "${RELEASE_TITLE:-${RELEASE_TAG}}" "${RELEASE_MAKE_LATEST:-false}"
+      if [ -n "${VERSION_TAG:-}" ] && [ "${VERSION_TAG}" != "${RELEASE_TAG}" ]; then
+        ensure_one "${VERSION_TAG}" "Redis ${RELEASE_VERSION}" "false"
       fi
-      echo ">>> Release ${TAG} 就绪"
 
   # 上传本架构产物（glob 只匹配本 workspace 的 dist，两架构互不覆盖）
   - name: upload-attachments
     image: cnbcool/attachments:latest
     settings:
       tag: ${RELEASE_TAG}
+      attachments:
+        - "./dist/*.tar.gz"
+
+  # 再往「版本标签」Release 传一份（与滚动标签内容一致）。
+  # 稳定版构建时 VERSION_TAG 等于 RELEASE_TAG，等于同一批文件重复上传一次，
+  # 附件按文件名覆盖，属幂等操作。
+  - name: upload-version-attachments
+    image: cnbcool/attachments:latest
+    settings:
+      tag: ${VERSION_TAG}
       attachments:
         - "./dist/*.tar.gz"
 
