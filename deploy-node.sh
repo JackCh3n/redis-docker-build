@@ -254,6 +254,44 @@ preflight() {
       die "单机测试模式请避开标准数据端口 6379（会和机器已有的 Redis 冲突），例如 --port 16379；确要如此请加 --force"
     fi
   fi
+
+  check_port_available
+}
+
+# 端口是否已被监听（返回 0 = 被占用），被占用时把监听者打印出来
+port_listeners() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -lntp 2>/dev/null | awk -v p="$port" 'NR>1 { n=split($4,a,":"); if (a[n]==p) print }'
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -lntp 2>/dev/null | awk -v p="$port" '$6=="LISTEN" { n=split($4,a,":"); if (a[n]==p) print }'
+  else
+    # 兜底：只要本地能连上就认为被占用（只能判断，报不出占用者）
+    if (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
+      echo "(无法确定占用进程：本机没有 ss/netstat)"
+    fi
+  fi
+}
+
+check_port_available() {
+  [ "$FORCE" = "yes" ] && return 0
+  local occ
+  occ="$(port_listeners "$PORT")"
+  [ -n "$occ" ] || return 0
+
+  echo "[ERROR] 端口 ${PORT} 已被占用，Redis 无法启动：" >&2
+  printf '%s\n' "$occ" | sed 's/^/        /' >&2
+
+  # Redis Cluster 的集群总线端口 = 客户端端口 + 10000，
+  # 机器上已有 cluster 节点时，「端口+10000」八成就是它的总线端口。
+  local base=$(( PORT - 10000 ))
+  if [ "$PORT" -gt 10000 ] && [ -n "$(port_listeners "$base")" ]; then
+    echo "        提示：${base} 上也有监听——Redis Cluster 会用「客户端端口+10000」作为集群总线端口，" >&2
+    echo "              所以 ${PORT} 很可能是那台 Redis 的总线端口。请换一个不在 [端口, 端口+10000]" >&2
+    echo "              区间里的端口，例如 16400 / 16401 / 16402。" >&2
+  fi
+  echo "        换个端口（--port），或确认可以复用后加 --force 跳过本检查。" >&2
+  exit 1
 }
 
 # =============================================================
@@ -526,9 +564,16 @@ start_unit() {
   if systemctl is-active --quiet "$UNIT_NAME"; then
     log "${UNIT_NAME} 已启动"
   else
-    warn "${UNIT_NAME} 未处于运行状态，最近日志："
-    journalctl -u "$UNIT_NAME" -n 20 --no-pager 2>/dev/null | sed 's/^/      /' || true
-    die "启动失败，请检查 ${LOG_FILE}"
+    # 先停掉：Restart=always 会每 3 秒重试一次，留着只会刷屏并反复失败
+    systemctl stop "$UNIT_NAME" >/dev/null 2>&1 || true
+    warn "启动失败（已停止 ${UNIT_NAME}，避免反复重启刷日志）"
+    echo "        最近日志（journalctl）：" >&2
+    journalctl -u "$UNIT_NAME" -n 10 --no-pager 2>/dev/null | sed 's/^/          /' >&2 || true
+    if [ -f "$LOG_FILE" ]; then
+      echo "        最近日志（${LOG_FILE}）：" >&2
+      tail -n 10 "$LOG_FILE" | sed 's/^/          /' >&2 || true
+    fi
+    die "启动失败，请根据上面的报错处理后重跑本命令（配置已写好，不会重复覆盖）"
   fi
 }
 
